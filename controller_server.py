@@ -73,26 +73,17 @@ async def bots(authorization: str | None = Header(default=None)):
         "total_bots": sum(len(x["bots"]) for x in data),
     }
 
-@app.post("/api/command")
-async def command(data: Command, authorization: str | None = Header(default=None)):
-    check_auth(authorization)
-
-    if data.command not in ALLOWED:
-        raise HTTPException(status_code=400, detail={
-            "error": "command_not_allowed",
-            "allowed": sorted(ALLOWED),
-        })
-
-    agent = agents.get(data.container)
+async def execute_one(container_name, bot, command_name, args):
+    agent = agents.get(container_name)
     if not agent:
-        raise HTTPException(status_code=404, detail="container_not_registered")
+        return {"ok": False, "container": container_name, "bot": bot, "error": "container_not_registered"}
 
     ws = agent.get("ws")
     if ws is None:
-        raise HTTPException(status_code=503, detail="container_offline")
+        return {"ok": False, "container": container_name, "bot": bot, "error": "container_offline"}
 
-    if data.bot not in agent.get("bots", set()):
-        raise HTTPException(status_code=404, detail="bot_not_registered")
+    if bot not in agent.get("bots", set()):
+        return {"ok": False, "container": container_name, "bot": bot, "error": "bot_not_registered"}
 
     request_id = str(uuid.uuid4())
     future = asyncio.get_running_loop().create_future()
@@ -101,26 +92,85 @@ async def command(data: Command, authorization: str | None = Header(default=None
     payload = {
         "type": "command",
         "id": request_id,
-        "bot": data.bot,
-        "command": data.command,
-        "args": data.args,
+        "bot": bot,
+        "command": command_name,
+        "args": args,
     }
 
-    lock = agent_locks.setdefault(data.container, asyncio.Lock())
+    lock = agent_locks.setdefault(container_name, asyncio.Lock())
 
     try:
         async with lock:
             await ws.send_text(json.dumps(payload))
-        result = await asyncio.wait_for(future, timeout=12)
+        result = await asyncio.wait_for(future, timeout=15)
         return {
-            "container": data.container,
-            "bot": data.bot,
+            "ok": bool(result.get("ok")),
+            "container": container_name,
+            "bot": bot,
             "result": result,
         }
     except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="bot_timeout")
+        return {"ok": False, "container": container_name, "bot": bot, "error": "bot_timeout"}
+    except Exception as exc:
+        return {"ok": False, "container": container_name, "bot": bot, "error": str(exc)}
     finally:
         pending.pop(request_id, None)
+
+@app.post("/api/command")
+async def command(data: Command, authorization: str | None = Header(default=None)):
+    check_auth(authorization)
+
+    command_name = data.command.strip().lower()
+    if command_name not in ALLOWED:
+        raise HTTPException(status_code=400, detail={
+            "error": "command_not_allowed",
+            "allowed": sorted(ALLOWED),
+        })
+
+    targets = []
+
+    if data.container == "all":
+        for container_name, agent in sorted(agents.items()):
+            if agent.get("ws") is None:
+                continue
+            if data.bot == "all":
+                for bot in sorted(agent.get("bots", set())):
+                    targets.append((container_name, bot))
+            elif data.bot in agent.get("bots", set()):
+                targets.append((container_name, data.bot))
+    else:
+        agent = agents.get(data.container)
+        if not agent:
+            raise HTTPException(status_code=404, detail="container_not_registered")
+
+        if data.bot == "all":
+            for bot in sorted(agent.get("bots", set())):
+                targets.append((data.container, bot))
+        else:
+            targets.append((data.container, data.bot))
+
+    if not targets:
+        raise HTTPException(status_code=404, detail="no_targets")
+
+    # Limite defensivo para evitar lotes acidentais gigantes.
+    if len(targets) > 500:
+        raise HTTPException(status_code=400, detail="too_many_targets")
+
+    results = await asyncio.gather(*[
+        execute_one(container_name, bot, command_name, data.args)
+        for container_name, bot in targets
+    ])
+
+    succeeded = sum(1 for item in results if item.get("ok"))
+    failed = len(results) - succeeded
+
+    return {
+        "ok": failed == 0,
+        "targets": len(results),
+        "succeeded": succeeded,
+        "failed": failed,
+        "results": results,
+    }
 
 @app.websocket("/ws/agent")
 async def agent(websocket: WebSocket):
@@ -272,6 +322,10 @@ function rebuildSelectors(){
   const previousBot=botSel.value;
 
   containerSel.innerHTML='';
+  const allContainers=document.createElement('option');
+  allContainers.value='all';
+  allContainers.textContent='TODOS OS CONTAINERS';
+  containerSel.appendChild(allContainers);
   for(const c of data){
     const opt=document.createElement('option');
     opt.value=c.name;
@@ -285,6 +339,10 @@ function rebuildSelectors(){
 
   const selected=data.find(c=>c.name===containerSel.value);
   botSel.innerHTML='';
+  const allBots=document.createElement('option');
+  allBots.value='all';
+  allBots.textContent=containerSel.value==='all' ? 'TODOS OS BOTS' : 'TODOS DESTE CONTAINER';
+  botSel.appendChild(allBots);
   if(selected){
     for(const b of selected.bots){
       const opt=document.createElement('option');
@@ -319,7 +377,16 @@ async function loadBots(){
       const head=document.createElement('div');
       head.className='container-head';
       head.innerHTML='<h3>'+c.name+'</h3><span class="'+(c.online?'online':'offline')+'">'+(c.online?'ONLINE':'OFFLINE')+'</span>';
+      const allActions=document.createElement('div');
+      allActions.className='actions';
+      for(const cmd of ['ping','status','uptime','memory','disk']){
+        const bt=document.createElement('button');
+        bt.textContent=cmd+' em todos';
+        bt.onclick=()=>run(c.name,'all',cmd);
+        allActions.appendChild(bt);
+      }
       section.appendChild(head);
+      section.appendChild(allActions);
 
       const grid=document.createElement('div');
       grid.className='grid';
@@ -382,7 +449,11 @@ async function run(container,bot,command,argsOverride=null){
       body:JSON.stringify({container,bot,command,args})
     });
     const j=await r.json();
-    out.textContent=JSON.stringify(j,null,2);
+    if(j.targets!==undefined){
+      out.textContent='Lote concluído: '+j.succeeded+'/'+j.targets+' sucesso(s), '+j.failed+' falha(s)\n\n'+JSON.stringify(j.results,null,2);
+    }else{
+      out.textContent=JSON.stringify(j,null,2);
+    }
   }catch(e){
     out.textContent=String(e);
   }
