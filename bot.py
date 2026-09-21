@@ -20,7 +20,7 @@ for d in (STATE_DIR, LOG_DIR, CMD_DIR):
     d.mkdir(exist_ok=True)
 
 STARTED_AT = time.time()
-WORKER_BUILD = "internet-v2"
+WORKER_BUILD = "sync-v3"
 
 ALLOWED_COMMANDS = {
     "ping", "status", "uptime", "hostname",
