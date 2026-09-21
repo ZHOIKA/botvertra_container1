@@ -11,6 +11,7 @@ import urllib.request
 from pathlib import Path
 
 BOT_ID = os.getenv("BOT_ID", "bot-unknown")
+BOT_PROXY = os.getenv("BOT_PROXY", "").strip()
 BASE_DIR = Path(__file__).resolve().parent
 STATE_DIR = BASE_DIR / "state"
 LOG_DIR = BASE_DIR / "logs"
@@ -20,7 +21,7 @@ for d in (STATE_DIR, LOG_DIR, CMD_DIR):
     d.mkdir(exist_ok=True)
 
 STARTED_AT = time.time()
-WORKER_BUILD = "sync-v4-ipcheck"
+WORKER_BUILD = "proxy-routing-v1"
 
 ALLOWED_COMMANDS = {
     "ping", "status", "uptime", "hostname",
@@ -40,6 +41,15 @@ def read_mem():
             }
     except Exception as e:
         return {"error": str(e)}
+
+def build_url_opener():
+    if BOT_PROXY:
+        handler = urllib.request.ProxyHandler({
+            "http": BOT_PROXY,
+            "https": BOT_PROXY,
+        })
+        return urllib.request.build_opener(handler)
+    return urllib.request.build_opener()
 
 def check_google_internet():
     target = "www.google.com"
@@ -64,7 +74,7 @@ def check_google_internet():
             headers={"User-Agent": "BotVertra-Connectivity/1.0"},
             method="GET",
         )
-        with urllib.request.urlopen(req, timeout=5) as response:
+        with build_url_opener().open(req, timeout=5) as response:
             status = int(response.status)
 
         latency_ms = round((time.perf_counter() - started) * 1000, 1)
@@ -99,7 +109,7 @@ def get_public_ip():
             headers={"User-Agent": "BotVertra-IPCheck/1.0"},
             method="GET",
         )
-        with urllib.request.urlopen(req, timeout=5) as response:
+        with build_url_opener().open(req, timeout=5) as response:
             payload = json.loads(response.read().decode("utf-8", errors="replace"))
         ip = str(payload.get("ip", "")).strip()
         return {
@@ -150,6 +160,7 @@ def execute_command(payload: dict):
             "platform": platform.platform(),
             "worker_build": WORKER_BUILD,
             "features": sorted(ALLOWED_COMMANDS),
+            "proxy_configured": bool(BOT_PROXY),
         }
 
     if cmd == "uptime":
