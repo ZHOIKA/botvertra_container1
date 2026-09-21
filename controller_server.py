@@ -168,6 +168,10 @@ async def delayed_tor_test():
     await asyncio.sleep(50)
     await run_single_tor_test()
 
+async def delayed_tor_reconnect_test():
+    await asyncio.sleep(12)
+    await run_single_tor_test()
+
 async def delayed_selftest():
     await asyncio.sleep(25)
     await run_selftest("25s")
@@ -391,6 +395,8 @@ async def agent(websocket: WebSocket):
 
         await websocket.send_text(json.dumps({"ok": True, "container": name}))
         print(f"[agent] {name} conectado com {len(bots)} bots", flush=True)
+        if name == "container1":
+            asyncio.create_task(delayed_tor_reconnect_test())
 
         while True:
             raw = await websocket.receive_text()
