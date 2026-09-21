@@ -209,6 +209,9 @@ class Command(BaseModel):
     command: str
     args: list = Field(default_factory=list)
 
+class IPAuditRequest(BaseModel):
+    container: str = "all"
+
 def snapshot():
     result = []
     for name in sorted(agents):
@@ -293,6 +296,93 @@ async def execute_one(container_name, bot, command_name, args):
         return {"ok": False, "container": container_name, "bot": bot, "error": str(exc)}
     finally:
         pending.pop(request_id, None)
+
+async def collect_ip_audit(container_filter="all"):
+    targets = []
+
+    if container_filter == "all":
+        for container_name, agent in sorted(agents.items()):
+            if agent.get("ws") is None:
+                continue
+            for bot in sorted(agent.get("bots", set())):
+                targets.append((container_name, bot))
+    else:
+        agent = agents.get(container_filter)
+        if not agent:
+            raise HTTPException(status_code=404, detail="container_not_registered")
+        if agent.get("ws") is None:
+            raise HTTPException(status_code=409, detail="container_offline")
+        for bot in sorted(agent.get("bots", set())):
+            targets.append((container_filter, bot))
+
+    if not targets:
+        raise HTTPException(status_code=404, detail="no_targets")
+
+    results = await asyncio.gather(*[
+        execute_one(container_name, bot, "public_ip", [])
+        for container_name, bot in targets
+    ])
+
+    ip_to_targets = {}
+    failures = []
+    for item in results:
+        result = item.get("result") if isinstance(item.get("result"), dict) else {}
+        ip = result.get("public_ip")
+        if item.get("ok") and ip:
+            ip_to_targets.setdefault(ip, []).append({
+                "container": item.get("container"),
+                "bot": item.get("bot"),
+            })
+        else:
+            failures.append({
+                "container": item.get("container"),
+                "bot": item.get("bot"),
+                "error": item.get("error") or result.get("error") or "public_ip_failed",
+            })
+
+    duplicate_groups = [
+        {"ip": ip, "count": len(owners), "bots": owners}
+        for ip, owners in sorted(ip_to_targets.items())
+        if len(owners) > 1
+    ]
+    unique_groups = [
+        {"ip": ip, "count": 1, "bots": owners}
+        for ip, owners in sorted(ip_to_targets.items())
+        if len(owners) == 1
+    ]
+
+    duplicate_bot_count = sum(group["count"] for group in duplicate_groups)
+
+    return {
+        "ok": len(failures) == 0,
+        "scope": container_filter,
+        "checked": len(results),
+        "successful": len(results) - len(failures),
+        "failed": len(failures),
+        "distinct_ips": len(ip_to_targets),
+        "duplicate_ip_count": len(duplicate_groups),
+        "duplicate_bot_count": duplicate_bot_count,
+        "duplicate_groups": duplicate_groups,
+        "unique_groups": unique_groups,
+        "failures": failures,
+        "checked_at": time.time(),
+    }
+
+@app.post("/api/ip-audit")
+async def ip_audit(data: IPAuditRequest, authorization: str | None = Header(default=None)):
+    check_auth(authorization)
+    container_filter = data.container.strip() or "all"
+    result = await collect_ip_audit(container_filter)
+
+    print(
+        f"[ip-audit] scope={container_filter} • "
+        f"{result['successful']}/{result['checked']} OK • "
+        f"{result['distinct_ips']} IP(s) • "
+        f"{result['duplicate_ip_count']} IP(s) duplicado(s) • "
+        f"{result['duplicate_bot_count']} bot(s) em grupos duplicados",
+        flush=True,
+    )
+    return result
 
 @app.post("/api/command")
 async def command(data: Command, authorization: str | None = Header(default=None)):
@@ -683,6 +773,7 @@ button:disabled{cursor:not-allowed;opacity:.55}
       <button class="chip" data-cmd="logs 40" type="button">logs 40</button>
       <button class="chip" data-cmd="internet" type="button">internet Google</button>
       <button class="chip" data-cmd="public_ip" type="button">IP público</button>
+      <button class="chip" id="auditAllIps" type="button">IPs duplicados • todos</button>
     </div>
   </section>
 
@@ -914,6 +1005,7 @@ function renderContainers(){
     for(const cmd of ['ping','status','uptime','memory','disk','internet','public_ip']){
       bulk.appendChild(actionButton(cmd+' em todos',()=>run(c.name,'all',cmd)));
     }
+    bulk.appendChild(actionButton('IPs duplicados',()=>auditIPs(c.name)));
 
     const grid=document.createElement('div');
     grid.className='bots-grid';
@@ -1012,6 +1104,72 @@ document.getElementById('quickCommands').addEventListener('click',(e)=>{
   commandInput.value=btn.dataset.cmd;
   commandInput.focus();
 });
+
+async function auditIPs(container='all'){
+  const label=container==='all'?'todos os containers':container;
+  setOutput('Auditando IPs públicos...\nEscopo: '+label+'\n\nConsultando os workers...','executando');
+
+  try{
+    const r=await fetch('/api/ip-audit',{
+      method:'POST',
+      headers:headers(),
+      body:JSON.stringify({container})
+    });
+    const j=await r.json();
+    if(!r.ok){
+      throw new Error(j.detail ? JSON.stringify(j.detail) : JSON.stringify(j));
+    }
+
+    const lines=[];
+    lines.push('AUDITORIA DE IP');
+    lines.push('Escopo: '+label);
+    lines.push('Bots verificados: '+j.successful+'/'+j.checked);
+    lines.push('IPs distintos: '+j.distinct_ips);
+    lines.push('IPs duplicados: '+j.duplicate_ip_count);
+    lines.push('Bots em grupos duplicados: '+j.duplicate_bot_count);
+
+    if(j.duplicate_groups.length){
+      lines.push('');
+      lines.push('DUPLICADOS');
+      for(const group of j.duplicate_groups){
+        lines.push('');
+        lines.push(group.ip+' • '+group.count+' bots');
+        for(const owner of group.bots){
+          lines.push('  - '+owner.container+'/'+owner.bot);
+        }
+      }
+    }else{
+      lines.push('');
+      lines.push('✓ Nenhum IP duplicado encontrado neste escopo.');
+    }
+
+    if(j.unique_groups.length){
+      lines.push('');
+      lines.push('IPs exclusivos: '+j.unique_groups.length);
+      for(const group of j.unique_groups){
+        const owner=group.bots[0];
+        lines.push('  '+group.ip+' → '+owner.container+'/'+owner.bot);
+      }
+    }
+
+    if(j.failures.length){
+      lines.push('');
+      lines.push('FALHAS: '+j.failures.length);
+      for(const item of j.failures){
+        lines.push('  - '+item.container+'/'+item.bot+' → '+item.error);
+      }
+    }
+
+    setOutput(lines.join('\n'),j.failures.length?'parcial':'concluído');
+  }catch(e){
+    setOutput(String(e),'erro');
+  }
+}
+
+const auditAllIps=document.getElementById('auditAllIps');
+if(auditAllIps){
+  auditAllIps.addEventListener('click',()=>auditIPs('all'));
+}
 
 async function runTyped(){
   const raw=commandInput.value.trim();
