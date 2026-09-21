@@ -24,7 +24,7 @@ for d in (STATE_DIR, LOG_DIR, CMD_DIR):
     d.mkdir(exist_ok=True)
 
 STARTED_AT = time.time()
-WORKER_BUILD = "tor-isolation-v1"
+WORKER_BUILD = "tor-diagnostics-v2"
 
 ALLOWED_COMMANDS = {
     "ping", "status", "uptime", "hostname",
