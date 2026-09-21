@@ -1,1 +1,3 @@
-fastapi>=0.115,<1\nuvicorn[standard]>=0.34,<1\nwebsockets>=15,<16\n
+fastapi>=0.115,<1
+uvicorn[standard]>=0.34,<1
+websockets>=15,<16
