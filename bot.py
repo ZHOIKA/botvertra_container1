@@ -21,14 +21,8 @@ for d in (STATE_DIR, LOG_DIR, CMD_DIR):
 STARTED_AT = time.time()
 
 ALLOWED_COMMANDS = {
-    "ping",
-    "status",
-    "uptime",
-    "hostname",
-    "disk",
-    "memory",
-    "echo",
-    "stop",
+    "ping", "status", "uptime", "hostname",
+    "disk", "memory", "echo", "logs",
 }
 
 def read_mem():
@@ -44,6 +38,15 @@ def read_mem():
             }
     except Exception as e:
         return {"error": str(e)}
+
+def tail_logs(lines=40):
+    lines = max(1, min(int(lines), 200))
+    result = []
+    for path in (LOG_DIR / f"{BOT_ID}.log", LOG_DIR / f"{BOT_ID}.stdout.log"):
+        if path.exists():
+            content = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            result.append({"file": path.name, "lines": content[-lines:]})
+    return result
 
 def execute_command(payload: dict):
     cmd = str(payload.get("command", "")).strip().lower()
@@ -102,8 +105,13 @@ def execute_command(payload: dict):
             "result": " ".join(str(x) for x in args)[:500],
         }
 
-    if cmd == "stop":
-        return {"ok": True, "bot": BOT_ID, "result": "stopping", "_stop": True}
+    if cmd == "logs":
+        amount = args[0] if args else 40
+        try:
+            amount = int(amount)
+        except Exception:
+            amount = 40
+        return {"ok": True, "bot": BOT_ID, "logs": tail_logs(amount)}
 
     return {"ok": False, "bot": BOT_ID, "error": "unknown"}
 
@@ -126,14 +134,12 @@ async def process_inbox():
                         "output": result
                     }) + "\n")
 
-                if result.get("_stop"):
-                    break
             except Exception as e:
                 err = {"ok": False, "bot": BOT_ID, "error": str(e)}
                 outbox.write_text(json.dumps(err, indent=2), encoding="utf-8")
                 inbox.unlink(missing_ok=True)
 
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.25)
 
 async def main():
     state = {
