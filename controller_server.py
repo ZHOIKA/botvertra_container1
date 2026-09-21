@@ -150,6 +150,7 @@ async def run_single_tor_test():
         "tor_configured": bool(status_result.get("tor_configured")),
         "public_ip": ip_result.get("public_ip"),
         "worker_build": status_result.get("worker_build"),
+        "setup": status_result.get("tor_test_state"),
         "error": None if status_item.get("ok") and ip_item.get("ok") else (
             status_item.get("error") or ip_item.get("error") or
             status_result.get("error") or ip_result.get("error") or "test_failed"
@@ -160,6 +161,7 @@ async def run_single_tor_test():
         f"tor={'ON' if tor_test_state['tor_configured'] else 'OFF'} • "
         f"ip={tor_test_state['public_ip']} • "
         f"build={tor_test_state['worker_build']} • "
+        f"setup={tor_test_state.get('setup')} • "
         f"error={tor_test_state['error']}",
         flush=True,
     )
@@ -951,7 +953,8 @@ function renderContainers(){
         if(s.tor_configured){
           note.textContent='TOR TEST • ATIVO'+(s.public_ip?' • IP '+s.public_ip:'');
         }else if(s.checked_at){
-          note.textContent='TOR TEST • INDISPONÍVEL'+(s.error?' • '+s.error:'');
+          const setup=s.setup||{};
+          note.textContent='TOR TEST • INDISPONÍVEL'+(setup.stage?' • '+setup.stage:'')+(setup.detail?' • '+setup.detail:'')+(s.error?' • '+s.error:'');
         }else{
           note.textContent='TOR TEST • aguardando verificação';
         }
