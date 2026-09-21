@@ -15,12 +15,23 @@ for directory in (LOG_DIR, PID_DIR, STATE_DIR, CMD_DIR):
     directory.mkdir(exist_ok=True)
 
 processes = []
-print("[manager] build=bridge-v3", flush=True)
+print("[manager] build=container1-proxy-v1", flush=True)
 
 for i in range(1, 21):
     bot_id = f"bot-{i:02d}"
     env = os.environ.copy()
     env["BOT_ID"] = bot_id
+
+    proxy_key = f"BOT_PROXY_{i:02d}"
+    bot_proxy = os.getenv(proxy_key, "").strip()
+    if bot_proxy:
+        env["BOT_PROXY"] = bot_proxy
+        env["HTTP_PROXY"] = bot_proxy
+        env["HTTPS_PROXY"] = bot_proxy
+        env["http_proxy"] = bot_proxy
+        env["https_proxy"] = bot_proxy
+    else:
+        env.pop("BOT_PROXY", None)
 
     log_path = LOG_DIR / f"{bot_id}.stdout.log"
     log_file = open(log_path, "ab", buffering=0)
