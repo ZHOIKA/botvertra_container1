@@ -7,6 +7,7 @@ import shutil
 import socket
 import sys
 import time
+import urllib.request
 from pathlib import Path
 
 BOT_ID = os.getenv("BOT_ID", "bot-unknown")
@@ -22,7 +23,7 @@ STARTED_AT = time.time()
 
 ALLOWED_COMMANDS = {
     "ping", "status", "uptime", "hostname",
-    "disk", "memory", "echo", "logs",
+    "disk", "memory", "echo", "logs", "internet",
 }
 
 def read_mem():
@@ -38,6 +39,55 @@ def read_mem():
             }
     except Exception as e:
         return {"error": str(e)}
+
+def check_google_internet():
+    target = "www.google.com"
+    url = "https://www.google.com/generate_204"
+    started = time.perf_counter()
+
+    try:
+        resolved_ip = socket.gethostbyname(target)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "bot": BOT_ID,
+            "internet": False,
+            "target": target,
+            "stage": "dns",
+            "error": str(exc),
+        }
+
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "BotVertra-Connectivity/1.0"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            status = int(response.status)
+
+        latency_ms = round((time.perf_counter() - started) * 1000, 1)
+        return {
+            "ok": status in (200, 204),
+            "bot": BOT_ID,
+            "internet": status in (200, 204),
+            "target": target,
+            "resolved_ip": resolved_ip,
+            "http_status": status,
+            "latency_ms": latency_ms,
+        }
+    except Exception as exc:
+        latency_ms = round((time.perf_counter() - started) * 1000, 1)
+        return {
+            "ok": False,
+            "bot": BOT_ID,
+            "internet": False,
+            "target": target,
+            "resolved_ip": resolved_ip,
+            "stage": "https",
+            "latency_ms": latency_ms,
+            "error": str(exc),
+        }
 
 def tail_logs(lines=40):
     lines = max(1, min(int(lines), 200))
@@ -97,6 +147,9 @@ def execute_command(payload: dict):
 
     if cmd == "memory":
         return {"ok": True, "bot": BOT_ID, "memory": read_mem()}
+
+    if cmd == "internet":
+        return check_google_internet()
 
     if cmd == "echo":
         return {
