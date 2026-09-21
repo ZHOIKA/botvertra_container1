@@ -31,6 +31,15 @@ ALLOWED_COMMANDS = {
     "disk", "memory", "echo", "logs", "internet", "public_ip",
 }
 
+def read_tor_test_state():
+    path = STATE_DIR / "tor-test.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"ok": False, "stage": "state_read_error", "detail": str(exc)}
+
 def read_mem():
     try:
         with open("/proc/meminfo", "r", encoding="utf-8") as f:
@@ -195,6 +204,7 @@ def execute_command(payload: dict):
             "proxy_configured": bool(BOT_PROXY),
             "tor_configured": bool(TOR_SOCKS_URL),
             "tor_isolation_id": TOR_ISOLATION_ID if TOR_SOCKS_URL else None,
+            "tor_test_state": read_tor_test_state() if BOT_ID == "bot-01" else None,
         }
 
     if cmd == "uptime":
