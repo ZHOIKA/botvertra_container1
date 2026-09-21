@@ -51,18 +51,50 @@ async def run_selftest(label):
         if not (item.get("ok") and result.get("result") == "pong"):
             print(f"[selftest:{label}][fail] {item}", flush=True)
 
+async def run_internet_selftest():
+    targets = []
+    for container_name, agent in sorted(agents.items()):
+        if agent.get("ws") is None:
+            continue
+        for bot in sorted(agent.get("bots", set())):
+            targets.append((container_name, bot))
+
+    if not targets:
+        print("[internet-test] nenhum bot conectado para testar", flush=True)
+        return
+
+    results = await asyncio.gather(*[
+        execute_one(container_name, bot, "internet", [])
+        for container_name, bot in targets
+    ])
+
+    ok = 0
+    failures = []
+    for item in results:
+        result = item.get("result") if isinstance(item.get("result"), dict) else {}
+        if item.get("ok") and result.get("internet") is True:
+            ok += 1
+        else:
+            failures.append(item)
+
+    print(f"[internet-test] Google HTTPS • {ok}/{len(results)} OK • {len(failures)} falha(s)", flush=True)
+    for item in failures:
+        print(f"[internet-test][fail] {item}", flush=True)
+
 async def delayed_selftest():
     await asyncio.sleep(25)
     await run_selftest("25s")
     await asyncio.sleep(40)
     await run_selftest("65s")
+    await asyncio.sleep(25)
+    await run_internet_selftest()
 
 @app.on_event("startup")
 async def start_selftest():
     asyncio.create_task(delayed_selftest())
 ALLOWED = {
     "ping", "status", "uptime", "hostname",
-    "disk", "memory", "echo", "logs"
+    "disk", "memory", "echo", "logs", "internet"
 }
 
 def check_auth(value):
@@ -539,6 +571,7 @@ button:disabled{cursor:not-allowed;opacity:.55}
       <button class="chip" data-cmd="disk" type="button">disk</button>
       <button class="chip" data-cmd="hostname" type="button">hostname</button>
       <button class="chip" data-cmd="logs 40" type="button">logs 40</button>
+      <button class="chip" data-cmd="internet" type="button">internet Google</button>
     </div>
   </section>
 
@@ -767,7 +800,7 @@ function renderContainers(){
 
     const bulk=document.createElement('div');
     bulk.className='bulk-actions';
-    for(const cmd of ['ping','status','uptime','memory','disk']){
+    for(const cmd of ['ping','status','uptime','memory','disk','internet']){
       bulk.appendChild(actionButton(cmd+' em todos',()=>run(c.name,'all',cmd)));
     }
 
@@ -794,7 +827,7 @@ function renderContainers(){
 
       const actions=document.createElement('div');
       actions.className='bot-actions';
-      for(const cmd of ['ping','status','memory','disk','uptime','logs']){
+      for(const cmd of ['ping','status','memory','disk','uptime','internet','logs']){
         const bt=document.createElement('button');
         bt.type='button';
         bt.textContent=cmd;
@@ -862,7 +895,7 @@ async function runTyped(){
   }
   const parts=raw.split(/\s+/);
   const cmd=parts.shift().toLowerCase();
-  const allowed=['ping','status','uptime','hostname','disk','memory','echo','logs'];
+  const allowed=['ping','status','uptime','hostname','disk','memory','echo','logs','internet'];
   if(!allowed.includes(cmd)){
     setOutput('Comando não permitido.\n\nPermitidos: '+allowed.join(', '),'bloqueado');
     return;
