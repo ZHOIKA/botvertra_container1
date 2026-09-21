@@ -81,6 +81,48 @@ async def run_internet_selftest():
     for item in failures:
         print(f"[internet-test][fail] {item}", flush=True)
 
+async def run_public_ip_selftest():
+    targets = []
+    for container_name, agent in sorted(agents.items()):
+        if agent.get("ws") is None:
+            continue
+        for bot in sorted(agent.get("bots", set())):
+            targets.append((container_name, bot))
+
+    if not targets:
+        print("[public-ip-test] nenhum bot conectado para testar", flush=True)
+        return
+
+    results = await asyncio.gather(*[
+        execute_one(container_name, bot, "public_ip", [])
+        for container_name, bot in targets
+    ])
+
+    ip_to_targets = {}
+    failures = []
+    for item in results:
+        result = item.get("result") if isinstance(item.get("result"), dict) else {}
+        ip = result.get("public_ip")
+        if item.get("ok") and ip:
+            ip_to_targets.setdefault(ip, []).append(
+                f"{item.get('container')}/{item.get('bot')}"
+            )
+        else:
+            failures.append(item)
+
+    print(
+        f"[public-ip-test] {len(results) - len(failures)}/{len(results)} OK • "
+        f"{len(ip_to_targets)} IP(s) publico(s) unico(s) • {len(failures)} falha(s)",
+        flush=True,
+    )
+    for ip, owners in sorted(ip_to_targets.items()):
+        print(
+            f"[public-ip-test][ip] {ip} • {len(owners)} bot(s) • " + ", ".join(owners),
+            flush=True,
+        )
+    for item in failures:
+        print(f"[public-ip-test][fail] {item}", flush=True)
+
 async def delayed_selftest():
     await asyncio.sleep(25)
     await run_selftest("25s")
@@ -88,13 +130,15 @@ async def delayed_selftest():
     await run_selftest("65s")
     await asyncio.sleep(25)
     await run_internet_selftest()
+    await asyncio.sleep(20)
+    await run_public_ip_selftest()
 
 @app.on_event("startup")
 async def start_selftest():
     asyncio.create_task(delayed_selftest())
 ALLOWED = {
     "ping", "status", "uptime", "hostname",
-    "disk", "memory", "echo", "logs", "internet"
+    "disk", "memory", "echo", "logs", "internet", "public_ip"
 }
 
 def check_auth(value):
@@ -573,6 +617,7 @@ button:disabled{cursor:not-allowed;opacity:.55}
       <button class="chip" data-cmd="hostname" type="button">hostname</button>
       <button class="chip" data-cmd="logs 40" type="button">logs 40</button>
       <button class="chip" data-cmd="internet" type="button">internet Google</button>
+      <button class="chip" data-cmd="public_ip" type="button">IP público</button>
     </div>
   </section>
 
@@ -801,7 +846,7 @@ function renderContainers(){
 
     const bulk=document.createElement('div');
     bulk.className='bulk-actions';
-    for(const cmd of ['ping','status','uptime','memory','disk','internet']){
+    for(const cmd of ['ping','status','uptime','memory','disk','internet','public_ip']){
       bulk.appendChild(actionButton(cmd+' em todos',()=>run(c.name,'all',cmd)));
     }
 
@@ -828,7 +873,7 @@ function renderContainers(){
 
       const actions=document.createElement('div');
       actions.className='bot-actions';
-      for(const cmd of ['ping','status','memory','disk','uptime','internet','logs']){
+      for(const cmd of ['ping','status','memory','disk','uptime','internet','public_ip','logs']){
         const bt=document.createElement('button');
         bt.type='button';
         bt.textContent=cmd;
@@ -896,7 +941,7 @@ async function runTyped(){
   }
   const parts=raw.split(/\s+/);
   const cmd=parts.shift().toLowerCase();
-  const allowed=['ping','status','uptime','hostname','disk','memory','echo','logs','internet'];
+  const allowed=['ping','status','uptime','hostname','disk','memory','echo','logs','internet','public_ip'];
   if(!allowed.includes(cmd)){
     setOutput('Comando não permitido.\n\nPermitidos: '+allowed.join(', '),'bloqueado');
     return;
