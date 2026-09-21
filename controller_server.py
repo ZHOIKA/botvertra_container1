@@ -246,7 +246,7 @@ async def agent(websocket: WebSocket):
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
-    return HTMLResponse("""<!doctype html>
+    return HTMLResponse(r"""<!doctype html>
 <html lang="pt-BR">
 <head>
 <meta charset="utf-8">
@@ -306,14 +306,38 @@ const botSel=document.getElementById('botSel');
 const commandInput=document.getElementById('command');
 
 let data=[];
-token.value=localStorage.getItem('botvertra_token')||'';
+
+function readSavedToken(){
+  try{
+    return localStorage.getItem('botvertra_token')||'';
+  }catch(e){
+    return '';
+  }
+}
+
+function writeSavedToken(value){
+  try{
+    localStorage.setItem('botvertra_token',value);
+    return true;
+  }catch(e){
+    return false;
+  }
+}
+
+token.value=readSavedToken();
 
 function headers(){
-  return {'Authorization':'Bearer '+token.value,'Content-Type':'application/json'}
+  return {'Authorization':'Bearer '+token.value.trim(),'Content-Type':'application/json'}
 }
 
 function save(){
-  localStorage.setItem('botvertra_token',token.value);
+  const value=token.value.trim();
+  if(!value){
+    state.textContent='digite o token';
+    return;
+  }
+  const saved=writeSavedToken(value);
+  state.textContent=saved ? 'token salvo ✓' : 'token em uso (armazenamento bloqueado)';
   loadBots();
 }
 
@@ -363,7 +387,10 @@ async function loadBots(){
   try{
     const r=await fetch('/api/bots',{headers:headers()});
     const j=await r.json();
-    if(!r.ok) throw new Error(JSON.stringify(j));
+    if(!r.ok){
+      if(r.status===401) throw new Error('Token inválido ou diferente do CONTROLLER_TOKEN do Render.');
+      throw new Error(JSON.stringify(j));
+    }
 
     data=j.containers||[];
     state.textContent=j.total_containers+' containers • '+j.total_bots+' bots';
