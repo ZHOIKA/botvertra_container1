@@ -20,11 +20,11 @@ for d in (STATE_DIR, LOG_DIR, CMD_DIR):
     d.mkdir(exist_ok=True)
 
 STARTED_AT = time.time()
-WORKER_BUILD = "sync-v3"
+WORKER_BUILD = "sync-v4-ipcheck"
 
 ALLOWED_COMMANDS = {
     "ping", "status", "uptime", "hostname",
-    "disk", "memory", "echo", "logs", "internet",
+    "disk", "memory", "echo", "logs", "internet", "public_ip",
 }
 
 def read_mem():
@@ -87,6 +87,32 @@ def check_google_internet():
             "resolved_ip": resolved_ip,
             "stage": "https",
             "latency_ms": latency_ms,
+            "error": str(exc),
+        }
+
+def get_public_ip():
+    url = "https://api.ipify.org?format=json"
+    started = time.perf_counter()
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "BotVertra-IPCheck/1.0"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+        ip = str(payload.get("ip", "")).strip()
+        return {
+            "ok": bool(ip),
+            "bot": BOT_ID,
+            "public_ip": ip or None,
+            "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "bot": BOT_ID,
+            "public_ip": None,
             "error": str(exc),
         }
 
@@ -153,6 +179,9 @@ def execute_command(payload: dict):
 
     if cmd == "internet":
         return check_google_internet()
+
+    if cmd == "public_ip":
+        return get_public_ip()
 
     if cmd == "echo":
         return {
