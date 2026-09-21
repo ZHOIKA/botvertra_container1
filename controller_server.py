@@ -5,6 +5,7 @@ import os
 import secrets
 import time
 import uuid
+import urllib.request
 
 from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
@@ -15,6 +16,24 @@ if not TOKEN:
     raise RuntimeError("CONTROLLER_TOKEN ausente")
 
 app = FastAPI(title="BotVertra Controller")
+
+@app.on_event("startup")
+async def trigger_vertra_deploy_once():
+    url = os.getenv("VERTRA_DEPLOY_WEBHOOK", "").strip()
+    enabled = os.getenv("TRIGGER_VERTRA_DEPLOY", "0").strip() == "1"
+    if not url or not enabled:
+        return
+    try:
+        req = urllib.request.Request(
+            url,
+            data=b"{}",
+            headers={"Content-Type": "application/json", "User-Agent": "botvertra-controller/1.0"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            print(f"[vertra] deploy webhook HTTP {resp.status}", flush=True)
+    except Exception as exc:
+        print(f"[vertra] deploy webhook falhou: {exc}", flush=True)
 
 agent_ws = None
 agent_bots = set()
