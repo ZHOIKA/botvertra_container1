@@ -32,6 +32,8 @@ for i in range(1, 21):
         env["https_proxy"] = bot_proxy
     else:
         env.pop("BOT_PROXY", None)
+        for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+            env.pop(key, None)
 
     log_path = LOG_DIR / f"{bot_id}.stdout.log"
     log_file = open(log_path, "ab", buffering=0)
