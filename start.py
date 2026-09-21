@@ -14,7 +14,8 @@ CMD_DIR = BASE_DIR / "commands"
 for directory in (LOG_DIR, PID_DIR, STATE_DIR, CMD_DIR):
     directory.mkdir(exist_ok=True)
 
-processes = []\nprint("[manager] build=bridge-v3", flush=True)
+processes = []
+print("[manager] build=bridge-v3", flush=True)
 
 for i in range(1, 21):
     bot_id = f"bot-{i:02d}"
