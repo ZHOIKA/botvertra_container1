@@ -1,63 +1,75 @@
 # VertraCloud - 20 Bots Python
 
-Projeto simples para rodar **20 agentes locais** dentro de um container Linux.
+Projeto para rodar **20 agentes locais** em um container Linux e controlá-los por uma API HTTP autenticada.
 
 ## Python
 
 Recomendado: **Python 3.13**.
 
-> Python 2.13 não existe.
+## Variáveis de ambiente
 
-## Arquivos
+Configure no painel da VertraCloud:
 
-- `bot.py` — processo do agente
-- `start.sh` — inicia os 20 bots
-- `stop.sh` — encerra os bots
-- `status.sh` — mostra estado/PID
-- `send.sh` — envia um comando local
-- `read.sh` — lê a última resposta
-- `logs/` — logs
-- `pids/` — PIDs
-- `commands/` — fila local de comandos
-- `state/` — estado dos bots
-
-## Instalação
-
-```bash
-git clone https://github.com/ZHOIKA/botvertra.git
-cd botvertra
-chmod +x *.sh
-./install.sh
-./start.sh
+```text
+BOT_API_TOKEN=coloque-uma-chave-grande-e-aleatoria
+PORT=8080
 ```
 
-## Status
+Não coloque o token diretamente no GitHub.
+
+## Inicialização na VertraCloud
+
+Use:
 
 ```bash
-./status.sh
+python3 start.py
 ```
 
-## Enviar comandos
+O `start.py` inicia:
 
-Para um bot:
+- 20 bots: `bot-01` até `bot-20`
+- 1 controller HTTP em `0.0.0.0:$PORT`
+
+## API externa
+
+Health check (não exige token):
 
 ```bash
-./send.sh bot-01 status
-./send.sh bot-07 uptime
-./send.sh bot-03 echo ola mundo
+curl https://SEU-DOMINIO/health
 ```
 
-Para todos:
+Listar os 20 bots:
 
 ```bash
-./send.sh all status
-./send.sh all ping
+curl https://SEU-DOMINIO/bots \
+  -H "Authorization: Bearer SEU_TOKEN"
 ```
 
-Depois:
+Executar em um bot:
 
 ```bash
-./read.sh bot-01
+curl -X POST https://SEU-DOMINIO/command \
+  -H "Authorization: Bearer SEU_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"bot":"bot-01","command":"status"}'
+```
+
+Executar nos 20:
+
+```bash
+curl -X POST https://SEU-DOMINIO/command \
+  -H "Authorization: Bearer SEU_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"bot":"all","command":"ping"}'
+```
+
+Exemplo com argumentos:
+
+```bash
+curl -X POST https://SEU-DOMINIO/command \
+  -H "Authorization: Bearer SEU_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"bot":"bot-03","command":"echo","args":["ola","mundo"]}'
 ```
 
 ## Comandos permitidos
@@ -71,9 +83,4 @@ Depois:
 - `echo`
 - `stop`
 
-O projeto propositalmente **não executa shell arbitrário recebido pela rede**.
-Se quiser tarefas específicas, adicione funções explícitas em `ALLOWED_COMMANDS`.
-
-## Observação de segurança
-
-Mesmo que você tenha root no container, é melhor executar os bots como um usuário sem privilégios quando possível.
+A API não aceita shell arbitrário. Novas ações devem ser implementadas explicitamente no código e adicionadas à whitelist.
