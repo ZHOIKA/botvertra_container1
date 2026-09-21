@@ -19,6 +19,15 @@ app = FastAPI(title="BotVertra Controller")
 agents = {}
 pending = {}
 agent_locks = {}
+tor_test_state = {
+    "container": "container1",
+    "bot": "bot-01",
+    "checked_at": 0,
+    "tor_configured": False,
+    "public_ip": None,
+    "worker_build": None,
+    "error": "aguardando_teste",
+}
 
 async def run_selftest(label):
     targets = []
@@ -123,6 +132,42 @@ async def run_public_ip_selftest():
     for item in failures:
         print(f"[public-ip-test][fail] {item}", flush=True)
 
+async def run_single_tor_test():
+    global tor_test_state
+    container_name = "container1"
+    bot = "bot-01"
+
+    status_item = await execute_one(container_name, bot, "status", [])
+    ip_item = await execute_one(container_name, bot, "public_ip", [])
+
+    status_result = status_item.get("result") if isinstance(status_item.get("result"), dict) else {}
+    ip_result = ip_item.get("result") if isinstance(ip_item.get("result"), dict) else {}
+
+    tor_test_state = {
+        "container": container_name,
+        "bot": bot,
+        "checked_at": time.time(),
+        "tor_configured": bool(status_result.get("tor_configured")),
+        "public_ip": ip_result.get("public_ip"),
+        "worker_build": status_result.get("worker_build"),
+        "error": None if status_item.get("ok") and ip_item.get("ok") else (
+            status_item.get("error") or ip_item.get("error") or
+            status_result.get("error") or ip_result.get("error") or "test_failed"
+        ),
+    }
+    print(
+        f"[tor-test] {container_name}/{bot} • "
+        f"tor={'ON' if tor_test_state['tor_configured'] else 'OFF'} • "
+        f"ip={tor_test_state['public_ip']} • "
+        f"build={tor_test_state['worker_build']} • "
+        f"error={tor_test_state['error']}",
+        flush=True,
+    )
+
+async def delayed_tor_test():
+    await asyncio.sleep(50)
+    await run_single_tor_test()
+
 async def delayed_selftest():
     await asyncio.sleep(25)
     await run_selftest("25s")
@@ -141,6 +186,7 @@ async def delayed_public_ip_test():
 async def start_selftest():
     asyncio.create_task(delayed_selftest())
     asyncio.create_task(delayed_public_ip_test())
+    asyncio.create_task(delayed_tor_test())
 ALLOWED = {
     "ping", "status", "uptime", "hostname",
     "disk", "memory", "echo", "logs", "internet", "public_ip"
@@ -167,7 +213,12 @@ def snapshot():
             "online": connected,
             "last_seen": item.get("last_seen", 0),
             "bots": [
-                {"bot": bot, "online": connected}
+                {
+                    "bot": bot,
+                    "online": connected,
+                    "tor_test": name == "container1" and bot == "bot-01",
+                    "tor_test_state": tor_test_state if name == "container1" and bot == "bot-01" else None,
+                }
                 for bot in sorted(item.get("bots", set()))
             ],
         })
@@ -513,6 +564,7 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .bot-head{display:flex;justify-content:space-between;gap:8px;align-items:center}
 .bot-name{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;font-weight:700}
 .bot-status{font-size:10px;color:var(--green)}
+.tor-note{margin-top:7px;padding:6px 8px;border-radius:8px;border:1px solid rgba(169,139,255,.22);background:rgba(169,139,255,.08);color:#c8b8ff;font-size:10px;line-height:1.35}
 .bot-actions{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;margin-top:10px}
 .bot-actions button{
   border:1px solid var(--border);background:#0f1927;color:var(--muted2);border-radius:8px;padding:7px 5px;font-size:10px
@@ -886,7 +938,21 @@ function renderContainers(){
         actions.appendChild(bt);
       }
 
-      bot.append(head,actions);
+      if(b.tor_test){
+        const note=document.createElement('div');
+        note.className='tor-note';
+        const s=b.tor_test_state||{};
+        if(s.tor_configured){
+          note.textContent='TOR TEST • ATIVO'+(s.public_ip?' • IP '+s.public_ip:'');
+        }else if(s.checked_at){
+          note.textContent='TOR TEST • INDISPONÍVEL'+(s.error?' • '+s.error:'');
+        }else{
+          note.textContent='TOR TEST • aguardando verificação';
+        }
+        bot.append(head,note,actions);
+      }else{
+        bot.append(head,actions);
+      }
       grid.appendChild(bot);
     }
 
