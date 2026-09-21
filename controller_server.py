@@ -20,8 +20,7 @@ agents = {}
 pending = {}
 agent_locks = {}
 
-async def delayed_selftest():
-    await asyncio.sleep(25)
+async def run_selftest(label):
     targets = []
     for container_name, agent in sorted(agents.items()):
         if agent.get("ws") is None:
@@ -30,7 +29,7 @@ async def delayed_selftest():
             targets.append((container_name, bot))
 
     if not targets:
-        print("[selftest] nenhum bot conectado para testar", flush=True)
+        print(f"[selftest:{label}] nenhum bot conectado para testar", flush=True)
         return
 
     results = await asyncio.gather(*[
@@ -45,12 +44,18 @@ async def delayed_selftest():
         and item["result"].get("result") == "pong"
     )
     failed = len(results) - ok
-    print(f"[selftest] ping concluido • {ok}/{len(results)} OK • {failed} falha(s)", flush=True)
+    print(f"[selftest:{label}] ping concluido • {ok}/{len(results)} OK • {failed} falha(s)", flush=True)
 
     for item in results:
         result = item.get("result") if isinstance(item.get("result"), dict) else {}
         if not (item.get("ok") and result.get("result") == "pong"):
-            print(f"[selftest][fail] {item}", flush=True)
+            print(f"[selftest:{label}][fail] {item}", flush=True)
+
+async def delayed_selftest():
+    await asyncio.sleep(25)
+    await run_selftest("25s")
+    await asyncio.sleep(40)
+    await run_selftest("65s")
 
 @app.on_event("startup")
 async def start_selftest():
