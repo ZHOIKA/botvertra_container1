@@ -19,8 +19,19 @@ for directory in (LOG_DIR, PID_DIR, STATE_DIR, CMD_DIR):
 processes = []
 TOR_TEST_BOT = "bot-01"
 TOR_TEST_PORT = 19050
+TOR_STATE_FILE = STATE_DIR / "tor-test.json"
 tor_process = None
 tor_socks_url = ""
+
+def write_tor_state(stage, ok=False, detail=None, socks_url=None):
+    payload = {
+        "stage": stage,
+        "ok": bool(ok),
+        "detail": detail,
+        "socks_url": socks_url,
+        "updated_at": time.time(),
+    }
+    TOR_STATE_FILE.write_text(__import__("json").dumps(payload, indent=2), encoding="utf-8")
 
 def wait_port(host, port, timeout=20):
     deadline = time.monotonic() + timeout
@@ -35,11 +46,16 @@ def wait_port(host, port, timeout=20):
 def ensure_tor_binary():
     existing = shutil.which("tor")
     if existing:
+        write_tor_state("tor_binary_found", True, existing)
         return existing
 
     apt = shutil.which("apt-get")
-    if not apt:
-        print("[tor-test] apt-get nao encontrado; nao foi possivel instalar Tor automaticamente", flush=True)
+    apk = shutil.which("apk")
+    dnf = shutil.which("dnf")
+    yum = shutil.which("yum")
+    if not any((apt, apk, dnf, yum)):
+        write_tor_state("package_manager_missing", False, "apt-get/apk/dnf/yum nao encontrados")
+        print("[tor-test] gerenciador de pacotes nao encontrado", flush=True)
         return None
 
     install_log_path = LOG_DIR / "tor-install.log"
@@ -51,14 +67,22 @@ def ensure_tor_binary():
     else:
         sudo = shutil.which("sudo")
         if not sudo:
+            write_tor_state("install_permission_denied", False, "sem root e sem sudo")
             print("[tor-test] sem root/sudo para instalar Tor automaticamente", flush=True)
             return None
         prefix = [sudo, "-n"]
 
-    commands = [
-        prefix + [apt, "update"],
-        prefix + [apt, "install", "-y", "--no-install-recommends", "tor"],
-    ]
+    if apt:
+        commands = [
+            prefix + [apt, "update"],
+            prefix + [apt, "install", "-y", "--no-install-recommends", "tor"],
+        ]
+    elif apk:
+        commands = [prefix + [apk, "add", "--no-cache", "tor"]]
+    elif dnf:
+        commands = [prefix + [dnf, "install", "-y", "tor"]]
+    else:
+        commands = [prefix + [yum, "install", "-y", "tor"]]
 
     try:
         with open(install_log_path, "ab", buffering=0) as install_log:
@@ -73,25 +97,34 @@ def ensure_tor_binary():
                     check=False,
                 )
                 if result.returncode != 0:
+                    write_tor_state(
+                        "install_failed",
+                        False,
+                        f"comando={' '.join(cmd)} rc={result.returncode}; veja logs/tor-install.log",
+                    )
                     print(
                         f"[tor-test] instalacao do Tor falhou rc={result.returncode}; veja logs/tor-install.log",
                         flush=True,
                     )
                     return None
     except Exception as exc:
+        write_tor_state("install_exception", False, str(exc))
         print(f"[tor-test] erro instalando Tor: {exc}", flush=True)
         return None
 
     installed = shutil.which("tor")
     if installed:
+        write_tor_state("tor_installed", True, installed)
         print("[tor-test] Tor instalado automaticamente", flush=True)
     else:
+        write_tor_state("tor_binary_missing_after_install", False, "pacote instalou mas binario nao apareceu no PATH")
         print("[tor-test] pacote instalado, mas binario tor nao apareceu no PATH", flush=True)
     return installed
 
 configured_tor = os.getenv("TOR_TEST_SOCKS_URL", "").strip()
 if configured_tor:
     tor_socks_url = configured_tor
+    write_tor_state("external_socks_configured", True, "TOR_TEST_SOCKS_URL", tor_socks_url)
     print(f"[tor-test] {TOR_TEST_BOT} usando endpoint SOCKS configurado", flush=True)
 else:
     tor_bin = ensure_tor_binary()
@@ -112,13 +145,17 @@ else:
         )
         if wait_port("127.0.0.1", TOR_TEST_PORT):
             tor_socks_url = f"socks5h://127.0.0.1:{TOR_TEST_PORT}"
+            write_tor_state("tor_ready", True, "SOCKS local ativo", tor_socks_url)
             print(f"[tor-test] {TOR_TEST_BOT} Tor local ativo em {TOR_TEST_PORT}", flush=True)
         else:
+            write_tor_state("tor_socks_unavailable", False, "binario iniciou mas porta SOCKS nao abriu")
             print("[tor-test] binario Tor encontrado, mas SOCKS nao ficou disponivel", flush=True)
     else:
+        if not TOR_STATE_FILE.exists():
+            write_tor_state("tor_binary_unavailable", False, "nao foi possivel localizar/instalar o binario Tor")
         print("[tor-test] binario Tor nao encontrado na imagem da Vertra", flush=True)
 
-print("[manager] build=container1-tor-test-v2", flush=True)
+print("[manager] build=container1-tor-test-v3", flush=True)
 
 for i in range(1, 21):
     bot_id = f"bot-{i:02d}"
