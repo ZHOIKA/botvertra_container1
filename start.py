@@ -16,14 +16,6 @@ for directory in (LOG_DIR, PID_DIR, STATE_DIR, CMD_DIR):
 
 processes = []
 
-# Controller HTTP (fica no stdout principal da plataforma)
-controller = subprocess.Popen(
-    [sys.executable, str(BASE_DIR / "controller.py")],
-    cwd=str(BASE_DIR),
-    env=os.environ.copy(),
-)
-print(f"[manager] controller iniciado pid={controller.pid}", flush=True)
-
 for i in range(1, 21):
     bot_id = f"bot-{i:02d}"
     env = os.environ.copy()
@@ -44,16 +36,28 @@ for i in range(1, 21):
     processes.append((bot_id, proc, log_file))
     print(f"[{bot_id}] iniciado pid={proc.pid}", flush=True)
 
+bridge = subprocess.Popen(
+    [sys.executable, str(BASE_DIR / "remote_bridge.py")],
+    cwd=str(BASE_DIR),
+    env=os.environ.copy(),
+)
+
 print(f"[manager] {len(processes)} bots iniciados", flush=True)
+print(f"[manager] bridge externo iniciado pid={bridge.pid}", flush=True)
 
 try:
     while True:
-        if controller.poll() is not None:
-            raise SystemExit(f"Controller HTTP encerrou com codigo {controller.returncode}")
-
         alive = sum(1 for _, proc, _ in processes if proc.poll() is None)
         if alive == 0:
             raise SystemExit("Todos os bots foram encerrados")
+
+        if bridge.poll() is not None:
+            print(f"[manager] bridge caiu ({bridge.returncode}); reiniciando", flush=True)
+            bridge = subprocess.Popen(
+                [sys.executable, str(BASE_DIR / "remote_bridge.py")],
+                cwd=str(BASE_DIR),
+                env=os.environ.copy(),
+            )
 
         time.sleep(5)
 
@@ -61,23 +65,18 @@ except KeyboardInterrupt:
     print("[manager] encerrando...", flush=True)
 
 finally:
-    if controller.poll() is None:
-        controller.terminate()
+    if bridge.poll() is None:
+        bridge.terminate()
 
-    for bot_id, proc, log_file in processes:
+    for _, proc, log_file in processes:
         if proc.poll() is None:
             proc.terminate()
         log_file.close()
 
-    for bot_id, proc, _ in processes:
+    for _, proc, _ in processes:
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
-
-    try:
-        controller.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        controller.kill()
 
     print("[manager] finalizado", flush=True)
