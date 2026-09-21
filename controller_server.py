@@ -171,13 +171,13 @@ async def dashboard():
 body{margin:0;background:#090d14;color:#eef;font-family:Arial,sans-serif}
 .wrap{max-width:1100px;margin:auto;padding:24px}
 .top{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-input,button{background:#121a27;color:#eef;border:1px solid #29364b;border-radius:9px;padding:10px}
+input,select,button{background:#121a27;color:#eef;border:1px solid #29364b;border-radius:9px;padding:10px}
 input{min-width:300px}button{cursor:pointer}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;margin-top:20px}
 .card{background:#0f1622;border:1px solid #223047;border-radius:14px;padding:14px}
 .row{display:flex;justify-content:space-between}.online{color:#60e6a8}.offline{color:#ff718b}
 .actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:12px}.actions button{font-size:12px;padding:7px}
-pre{background:#05080d;border:1px solid #202a3b;border-radius:12px;padding:14px;max-height:420px;overflow:auto}
+pre{background:#05080d;border:1px solid #202a3b;border-radius:12px;padding:14px;max-height:420px;overflow:auto}.console{margin-top:18px;background:#0f1622;border:1px solid #223047;border-radius:14px;padding:14px}.console-row{display:flex;gap:8px;flex-wrap:wrap}.console-row select{min-width:140px}.console-row input{flex:1;min-width:240px}.hint{color:#8fa1ba;font-size:12px;margin-top:8px}
 </style>
 </head>
 <body><div class="wrap">
@@ -188,6 +188,15 @@ pre{background:#05080d;border:1px solid #202a3b;border-radius:12px;padding:14px;
 <button onclick="loadBots()">Atualizar</button>
 <span id="state"></span>
 </div>
+<div class="console">
+<h3 style="margin-top:0">Console</h3>
+<div class="console-row">
+<select id="target"></select>
+<input id="command" placeholder="Ex.: status | logs 100 | echo oi">
+<button onclick="runTyped()">Executar</button>
+</div>
+<div class="hint">Permitidos: ping, status, uptime, hostname, disk, memory, echo, logs</div>
+</div>
 <div id="grid" class="grid"></div>
 <h3>Saída</h3>
 <pre id="out">Pronto.</pre>
@@ -197,6 +206,8 @@ const token=document.getElementById('token');
 const grid=document.getElementById('grid');
 const out=document.getElementById('out');
 const state=document.getElementById('state');
+const target=document.getElementById('target');
+const commandInput=document.getElementById('command');
 token.value=localStorage.getItem('botvertra_token')||'';
 
 function headers(){return {'Authorization':'Bearer '+token.value,'Content-Type':'application/json'}}
@@ -209,6 +220,14 @@ async function loadBots(){
     if(!r.ok) throw new Error(JSON.stringify(j));
     state.textContent=j.agent ? j.agent+' conectado' : 'container offline';
     grid.innerHTML='';
+    const previous=target.value;
+    target.innerHTML='';
+    for(const b of j.bots){
+      const opt=document.createElement('option');
+      opt.value=b.bot; opt.textContent=b.bot;
+      target.appendChild(opt);
+    }
+    if(previous && [...target.options].some(o=>o.value===previous)) target.value=previous;
     for(const b of j.bots){
       const card=document.createElement('div');
       card.className='card';
@@ -228,9 +247,25 @@ async function loadBots(){
   }
 }
 
-async function run(bot,command){
+async function runTyped(){
+  const raw=commandInput.value.trim();
+  if(!raw){out.textContent='Digite um comando.';return;}
+  const parts=raw.split(/\s+/);
+  const cmd=parts.shift().toLowerCase();
+  const allowed=['ping','status','uptime','hostname','disk','memory','echo','logs'];
+  if(!allowed.includes(cmd)){
+    out.textContent='Comando não permitido. Use: '+allowed.join(', ');
+    return;
+  }
+  let args=parts;
+  if(cmd==='logs' && args.length===0) args=['60'];
+  await run(target.value,cmd,args);
+}
+commandInput.addEventListener('keydown',e=>{if(e.key==='Enter')runTyped()});
+
+async function run(bot,command,argsOverride=null){
   out.textContent='Executando '+command+' em '+bot+'...';
-  const args=command==='logs'?[60]:[];
+  const args=argsOverride ?? (command==='logs'?[60]:[]);
   const r=await fetch('/api/command',{
     method:'POST',
     headers:headers(),
