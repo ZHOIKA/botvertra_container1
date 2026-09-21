@@ -5,14 +5,12 @@ import os
 import secrets
 import time
 import uuid
-import urllib.request
 
 from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 TOKEN = os.getenv("CONTROLLER_TOKEN", "").strip()
-VERTRA_CONTAINER4_DEPLOY_WEBHOOK = os.getenv("VERTRA_CONTAINER4_DEPLOY_WEBHOOK", "").strip()
 if not TOKEN:
     raise RuntimeError("CONTROLLER_TOKEN ausente")
 
@@ -246,34 +244,6 @@ async def command(data: Command, authorization: str | None = Header(default=None
         "results": results,
     }
 
-
-async def trigger_webhook(url: str):
-    def do_request():
-        req = urllib.request.Request(
-            url,
-            data=b"{}",
-            headers={"Content-Type": "application/json", "User-Agent": "BotVertra-Controller/1.0"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=20) as response:
-            body = response.read(4096).decode("utf-8", errors="replace")
-            return {"status": int(response.status), "body": body}
-
-    return await asyncio.to_thread(do_request)
-
-@app.post("/api/deploy/container4")
-async def deploy_container4(authorization: str | None = Header(default=None)):
-    check_auth(authorization)
-    if not VERTRA_CONTAINER4_DEPLOY_WEBHOOK:
-        raise HTTPException(status_code=503, detail="container4_webhook_not_configured")
-
-    try:
-        result = await trigger_webhook(VERTRA_CONTAINER4_DEPLOY_WEBHOOK)
-        print(f"[deploy] container4 webhook acionado • HTTP {result['status']}", flush=True)
-        return {"ok": True, "container": "container4", "webhook_status": result["status"]}
-    except Exception as exc:
-        print(f"[deploy] container4 webhook falhou: {exc}", flush=True)
-        raise HTTPException(status_code=502, detail=f"deploy_webhook_failed: {exc}")
 
 @app.websocket("/ws/agent")
 async def agent(websocket: WebSocket):
@@ -834,9 +804,6 @@ function renderContainers(){
     for(const cmd of ['ping','status','uptime','memory','disk','internet']){
       bulk.appendChild(actionButton(cmd+' em todos',()=>run(c.name,'all',cmd)));
     }
-    if(c.name==='container4'){
-      bulk.appendChild(actionButton('redeploy container4',()=>redeployContainer4()));
-    }
 
     const grid=document.createElement('div');
     grid.className='bots-grid';
@@ -920,23 +887,6 @@ document.getElementById('quickCommands').addEventListener('click',(e)=>{
   commandInput.value=btn.dataset.cmd;
   commandInput.focus();
 });
-
-async function redeployContainer4(){
-  setOutput('Solicitando redeploy do container4 na VertraCloud...','executando');
-  try{
-    const r=await fetch('/api/deploy/container4',{
-      method:'POST',
-      headers:headers()
-    });
-    const j=await r.json();
-    if(!r.ok){
-      throw new Error(j.detail ? String(j.detail) : JSON.stringify(j));
-    }
-    setOutput('Redeploy do container4 solicitado com sucesso.\n\n'+JSON.stringify(j,null,2),'concluído');
-  }catch(e){
-    setOutput(String(e),'erro');
-  }
-}
 
 async function runTyped(){
   const raw=commandInput.value.trim();
