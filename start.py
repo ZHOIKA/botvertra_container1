@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import os
+import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -15,12 +17,63 @@ for directory in (LOG_DIR, PID_DIR, STATE_DIR, CMD_DIR):
     directory.mkdir(exist_ok=True)
 
 processes = []
-print("[manager] build=container1-proxy-v1", flush=True)
+TOR_TEST_BOT = "bot-01"
+TOR_TEST_PORT = 19050
+tor_process = None
+tor_socks_url = ""
+
+def wait_port(host, port, timeout=12):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.5):
+                return True
+        except OSError:
+            time.sleep(0.25)
+    return False
+
+configured_tor = os.getenv("TOR_TEST_SOCKS_URL", "").strip()
+if configured_tor:
+    tor_socks_url = configured_tor
+    print(f"[tor-test] {TOR_TEST_BOT} usando endpoint SOCKS configurado", flush=True)
+else:
+    tor_bin = shutil.which("tor")
+    if tor_bin:
+        tor_data = BASE_DIR / "tor-data"
+        tor_data.mkdir(exist_ok=True)
+        tor_log = open(LOG_DIR / "tor-test.log", "ab", buffering=0)
+        tor_process = subprocess.Popen(
+            [
+                tor_bin,
+                "--SocksPort", f"127.0.0.1:{TOR_TEST_PORT}",
+                "--DataDirectory", str(tor_data),
+                "--Log", "notice stdout",
+            ],
+            cwd=str(BASE_DIR),
+            stdout=tor_log,
+            stderr=subprocess.STDOUT,
+        )
+        if wait_port("127.0.0.1", TOR_TEST_PORT):
+            tor_socks_url = f"socks5h://127.0.0.1:{TOR_TEST_PORT}"
+            print(f"[tor-test] {TOR_TEST_BOT} Tor local ativo em {TOR_TEST_PORT}", flush=True)
+        else:
+            print("[tor-test] binario Tor encontrado, mas SOCKS nao ficou disponivel", flush=True)
+    else:
+        print("[tor-test] binario Tor nao encontrado na imagem da Vertra", flush=True)
+
+print("[manager] build=container1-tor-test-v1", flush=True)
 
 for i in range(1, 21):
     bot_id = f"bot-{i:02d}"
     env = os.environ.copy()
     env["BOT_ID"] = bot_id
+
+    if bot_id == TOR_TEST_BOT and tor_socks_url:
+        env["TOR_SOCKS_URL"] = tor_socks_url
+        env["TOR_ISOLATION_ID"] = "container1-bot-01-test"
+    else:
+        env.pop("TOR_SOCKS_URL", None)
+        env.pop("TOR_ISOLATION_ID", None)
 
     proxy_key = f"BOT_PROXY_{i:02d}"
     bot_proxy = os.getenv(proxy_key, "").strip()
@@ -81,6 +134,9 @@ except KeyboardInterrupt:
 finally:
     if bridge.poll() is None:
         bridge.terminate()
+
+    if tor_process is not None and tor_process.poll() is None:
+        tor_process.terminate()
 
     for _, proc, log_file in processes:
         if proc.poll() is None:
