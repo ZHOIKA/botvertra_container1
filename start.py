@@ -84,15 +84,12 @@ def find_bundled_tor(root):
 
 def tor_runtime_env(tor_bin):
     env = os.environ.copy()
-    library_dirs = []
-    root = TOR_VENDOR_DIR
-    for path in root.rglob("*.so*"):
-        parent = str(path.parent)
-        if parent not in library_dirs:
-            library_dirs.append(parent)
-    if library_dirs:
-        old = env.get("LD_LIBRARY_PATH", "")
-        env["LD_LIBRARY_PATH"] = ":".join(library_dirs + ([old] if old else []))
+    # O Expert Bundle guarda as bibliotecas carregaveis ao lado do binario.
+    # Nao inclua a pasta debug/: ela contem arquivos de simbolos com nomes
+    # iguais aos .so reais e o dynamic loader pode tentar carrega-los.
+    libdir = str(tor_bin.parent)
+    old = env.get("LD_LIBRARY_PATH", "")
+    env["LD_LIBRARY_PATH"] = libdir + (":" + old if old else "")
     env["HOME"] = str(BASE_DIR)
     return env
 
@@ -254,7 +251,7 @@ else:
             write_tor_state("tor_binary_unavailable", False, "nao foi possivel localizar/instalar o binario Tor")
         print("[tor-test] binario Tor nao encontrado na imagem da Vertra", flush=True)
 
-print("[manager] build=container1-tor-userspace-v1", flush=True)
+print("[manager] build=container1-tor-userspace-v2", flush=True)
 
 for i in range(1, 21):
     bot_id = f"bot-{i:02d}"
