@@ -133,9 +133,14 @@ async def delayed_selftest():
     await asyncio.sleep(20)
     await run_public_ip_selftest()
 
+async def delayed_public_ip_test():
+    await asyncio.sleep(45)
+    await run_public_ip_selftest()
+
 @app.on_event("startup")
 async def start_selftest():
     asyncio.create_task(delayed_selftest())
+    asyncio.create_task(delayed_public_ip_test())
 ALLOWED = {
     "ping", "status", "uptime", "hostname",
     "disk", "memory", "echo", "logs", "internet", "public_ip"
