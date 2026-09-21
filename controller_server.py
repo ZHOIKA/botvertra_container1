@@ -5,11 +5,10 @@ import os
 import secrets
 import time
 import uuid
-import urllib.request
 
 from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 TOKEN = os.getenv("CONTROLLER_TOKEN", "").strip()
 if not TOKEN:
@@ -17,30 +16,9 @@ if not TOKEN:
 
 app = FastAPI(title="BotVertra Controller")
 
-@app.on_event("startup")
-async def trigger_vertra_deploy_once():
-    url = os.getenv("VERTRA_DEPLOY_WEBHOOK", "").strip()
-    enabled = os.getenv("TRIGGER_VERTRA_DEPLOY", "0").strip() == "1"
-    if not url or not enabled:
-        return
-    try:
-        req = urllib.request.Request(
-            url,
-            data=b"{}",
-            headers={"Content-Type": "application/json", "User-Agent": "botvertra-controller/1.0"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            print(f"[vertra] deploy webhook HTTP {resp.status}", flush=True)
-    except Exception as exc:
-        print(f"[vertra] deploy webhook falhou: {exc}", flush=True)
-
-agent_ws = None
-agent_bots = set()
-agent_name = None
-last_seen = 0.0
+agents = {}
 pending = {}
-send_lock = asyncio.Lock()
+agent_locks = {}
 
 ALLOWED = {
     "ping", "status", "uptime", "hostname",
@@ -53,28 +31,46 @@ def check_auth(value):
         raise HTTPException(status_code=401, detail="unauthorized")
 
 class Command(BaseModel):
+    container: str
     bot: str
     command: str
-    args: list = []
+    args: list = Field(default_factory=list)
+
+def snapshot():
+    result = []
+    for name in sorted(agents):
+        item = agents[name]
+        connected = item.get("ws") is not None
+        result.append({
+            "name": name,
+            "online": connected,
+            "last_seen": item.get("last_seen", 0),
+            "bots": [
+                {"bot": bot, "online": connected}
+                for bot in sorted(item.get("bots", set()))
+            ],
+        })
+    return result
 
 @app.get("/health")
 async def health():
+    data = snapshot()
     return {
         "ok": True,
-        "agent_connected": agent_ws is not None,
-        "agent": agent_name,
-        "bots": len(agent_bots),
+        "containers": len(data),
+        "online_containers": sum(1 for x in data if x["online"]),
+        "bots": sum(len(x["bots"]) for x in data),
     }
 
 @app.get("/api/bots")
 async def bots(authorization: str | None = Header(default=None)):
     check_auth(authorization)
-    connected = agent_ws is not None
+    data = snapshot()
     return {
         "ok": True,
-        "agent": agent_name,
-        "last_seen": last_seen,
-        "bots": [{"bot": b, "online": connected} for b in sorted(agent_bots)],
+        "containers": data,
+        "total_containers": len(data),
+        "total_bots": sum(len(x["bots"]) for x in data),
     }
 
 @app.post("/api/command")
@@ -87,11 +83,16 @@ async def command(data: Command, authorization: str | None = Header(default=None
             "allowed": sorted(ALLOWED),
         })
 
-    if data.bot not in agent_bots:
-        raise HTTPException(status_code=404, detail="bot_not_registered")
+    agent = agents.get(data.container)
+    if not agent:
+        raise HTTPException(status_code=404, detail="container_not_registered")
 
-    if agent_ws is None:
+    ws = agent.get("ws")
+    if ws is None:
         raise HTTPException(status_code=503, detail="container_offline")
+
+    if data.bot not in agent.get("bots", set()):
+        raise HTTPException(status_code=404, detail="bot_not_registered")
 
     request_id = str(uuid.uuid4())
     future = asyncio.get_running_loop().create_future()
@@ -105,10 +106,17 @@ async def command(data: Command, authorization: str | None = Header(default=None
         "args": data.args,
     }
 
+    lock = agent_locks.setdefault(data.container, asyncio.Lock())
+
     try:
-        async with send_lock:
-            await agent_ws.send_text(json.dumps(payload))
-        return await asyncio.wait_for(future, timeout=12)
+        async with lock:
+            await ws.send_text(json.dumps(payload))
+        result = await asyncio.wait_for(future, timeout=12)
+        return {
+            "container": data.container,
+            "bot": data.bot,
+            "result": result,
+        }
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="bot_timeout")
     finally:
@@ -116,9 +124,8 @@ async def command(data: Command, authorization: str | None = Header(default=None
 
 @app.websocket("/ws/agent")
 async def agent(websocket: WebSocket):
-    global agent_ws, agent_bots, agent_name, last_seen
-
     await websocket.accept()
+    name = None
 
     try:
         raw = await asyncio.wait_for(websocket.receive_text(), timeout=10)
@@ -130,22 +137,45 @@ async def agent(websocket: WebSocket):
 
         received = str(auth.get("token", ""))
         if not secrets.compare_digest(received, TOKEN):
-            await websocket.send_text(json.dumps({"ok": False}))
+            await websocket.send_text(json.dumps({"ok": False, "error": "unauthorized"}))
             await websocket.close(code=4401)
             return
 
-        agent_ws = websocket
-        agent_bots = set(auth.get("bots", []))
-        agent_name = str(auth.get("container", "container1"))
-        last_seen = time.time()
+        name = str(auth.get("container", "")).strip()
+        if not name or len(name) > 64:
+            await websocket.send_text(json.dumps({"ok": False, "error": "invalid_container"}))
+            await websocket.close(code=4400)
+            return
 
-        await websocket.send_text(json.dumps({"ok": True}))
-        print(f"[agent] {agent_name} conectado com {len(agent_bots)} bots", flush=True)
+        bots = {
+            str(bot) for bot in auth.get("bots", [])
+            if isinstance(bot, str) and bot.startswith("bot-")
+        }
+
+        old = agents.get(name, {}).get("ws")
+        if old is not None and old is not websocket:
+            try:
+                await old.close(code=4000)
+            except Exception:
+                pass
+
+        agents[name] = {
+            "ws": websocket,
+            "bots": bots,
+            "last_seen": time.time(),
+        }
+        agent_locks.setdefault(name, asyncio.Lock())
+
+        await websocket.send_text(json.dumps({"ok": True, "container": name}))
+        print(f"[agent] {name} conectado com {len(bots)} bots", flush=True)
 
         while True:
             raw = await websocket.receive_text()
-            last_seen = time.time()
             msg = json.loads(raw)
+
+            current = agents.get(name)
+            if current and current.get("ws") is websocket:
+                current["last_seen"] = time.time()
 
             if msg.get("type") == "result":
                 future = pending.get(msg.get("id"))
@@ -154,10 +184,15 @@ async def agent(websocket: WebSocket):
 
     except (WebSocketDisconnect, asyncio.TimeoutError):
         pass
+    except Exception as exc:
+        print(f"[agent] {name or 'desconhecido'} erro: {exc}", flush=True)
     finally:
-        if agent_ws is websocket:
-            agent_ws = None
-            print("[agent] desconectado", flush=True)
+        if name:
+            current = agents.get(name)
+            if current and current.get("ws") is websocket:
+                current["ws"] = None
+                current["last_seen"] = time.time()
+                print(f"[agent] {name} desconectado", flush=True)
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
@@ -168,16 +203,21 @@ async def dashboard():
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>BotVertra</title>
 <style>
+*{box-sizing:border-box}
 body{margin:0;background:#090d14;color:#eef;font-family:Arial,sans-serif}
-.wrap{max-width:1100px;margin:auto;padding:24px}
-.top{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.wrap{max-width:1200px;margin:auto;padding:24px}
+.top,.console-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 input,select,button{background:#121a27;color:#eef;border:1px solid #29364b;border-radius:9px;padding:10px}
-input{min-width:300px}button{cursor:pointer}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;margin-top:20px}
+input{min-width:280px}button{cursor:pointer}
+.console{margin-top:18px;background:#0f1622;border:1px solid #223047;border-radius:14px;padding:14px}
+.console-row select{min-width:150px}.console-row input{flex:1;min-width:240px}
+.hint,.muted{color:#8fa1ba;font-size:12px}
+.container{margin-top:24px}.container-head{display:flex;justify-content:space-between;align-items:center}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;margin-top:10px}
 .card{background:#0f1622;border:1px solid #223047;border-radius:14px;padding:14px}
 .row{display:flex;justify-content:space-between}.online{color:#60e6a8}.offline{color:#ff718b}
 .actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:12px}.actions button{font-size:12px;padding:7px}
-pre{background:#05080d;border:1px solid #202a3b;border-radius:12px;padding:14px;max-height:420px;overflow:auto}.console{margin-top:18px;background:#0f1622;border:1px solid #223047;border-radius:14px;padding:14px}.console-row{display:flex;gap:8px;flex-wrap:wrap}.console-row select{min-width:140px}.console-row input{flex:1;min-width:240px}.hint{color:#8fa1ba;font-size:12px;margin-top:8px}
+pre{background:#05080d;border:1px solid #202a3b;border-radius:12px;padding:14px;max-height:460px;overflow:auto;white-space:pre-wrap}
 </style>
 </head>
 <body><div class="wrap">
@@ -188,58 +228,119 @@ pre{background:#05080d;border:1px solid #202a3b;border-radius:12px;padding:14px;
 <button onclick="loadBots()">Atualizar</button>
 <span id="state"></span>
 </div>
+
 <div class="console">
 <h3 style="margin-top:0">Console</h3>
 <div class="console-row">
-<select id="target"></select>
+<select id="containerSel"></select>
+<select id="botSel"></select>
 <input id="command" placeholder="Ex.: status | logs 100 | echo oi">
 <button onclick="runTyped()">Executar</button>
 </div>
 <div class="hint">Permitidos: ping, status, uptime, hostname, disk, memory, echo, logs</div>
 </div>
-<div id="grid" class="grid"></div>
+
+<div id="containers"></div>
+
 <h3>Saída</h3>
 <pre id="out">Pronto.</pre>
 </div>
+
 <script>
 const token=document.getElementById('token');
-const grid=document.getElementById('grid');
+const containersEl=document.getElementById('containers');
 const out=document.getElementById('out');
 const state=document.getElementById('state');
-const target=document.getElementById('target');
+const containerSel=document.getElementById('containerSel');
+const botSel=document.getElementById('botSel');
 const commandInput=document.getElementById('command');
+
+let data=[];
 token.value=localStorage.getItem('botvertra_token')||'';
 
-function headers(){return {'Authorization':'Bearer '+token.value,'Content-Type':'application/json'}}
-function save(){localStorage.setItem('botvertra_token',token.value);loadBots()}
+function headers(){
+  return {'Authorization':'Bearer '+token.value,'Content-Type':'application/json'}
+}
+
+function save(){
+  localStorage.setItem('botvertra_token',token.value);
+  loadBots();
+}
+
+function rebuildSelectors(){
+  const previousContainer=containerSel.value;
+  const previousBot=botSel.value;
+
+  containerSel.innerHTML='';
+  for(const c of data){
+    const opt=document.createElement('option');
+    opt.value=c.name;
+    opt.textContent=c.name+(c.online?'':' (offline)');
+    containerSel.appendChild(opt);
+  }
+
+  if(previousContainer && [...containerSel.options].some(o=>o.value===previousContainer)){
+    containerSel.value=previousContainer;
+  }
+
+  const selected=data.find(c=>c.name===containerSel.value);
+  botSel.innerHTML='';
+  if(selected){
+    for(const b of selected.bots){
+      const opt=document.createElement('option');
+      opt.value=b.bot;
+      opt.textContent=b.bot;
+      botSel.appendChild(opt);
+    }
+  }
+
+  if(previousBot && [...botSel.options].some(o=>o.value===previousBot)){
+    botSel.value=previousBot;
+  }
+}
+
+containerSel.addEventListener('change',rebuildSelectors);
 
 async function loadBots(){
   try{
     const r=await fetch('/api/bots',{headers:headers()});
     const j=await r.json();
     if(!r.ok) throw new Error(JSON.stringify(j));
-    state.textContent=j.agent ? j.agent+' conectado' : 'container offline';
-    grid.innerHTML='';
-    const previous=target.value;
-    target.innerHTML='';
-    for(const b of j.bots){
-      const opt=document.createElement('option');
-      opt.value=b.bot; opt.textContent=b.bot;
-      target.appendChild(opt);
-    }
-    if(previous && [...target.options].some(o=>o.value===previous)) target.value=previous;
-    for(const b of j.bots){
-      const card=document.createElement('div');
-      card.className='card';
-      card.innerHTML='<div class="row"><b>'+b.bot+'</b><span class="'+(b.online?'online':'offline')+'">'+(b.online?'ONLINE':'OFFLINE')+'</span></div><div class="actions"></div>';
-      const actions=card.querySelector('.actions');
-      for(const cmd of ['ping','status','uptime','memory','disk','logs']){
-        const bt=document.createElement('button');
-        bt.textContent=cmd;
-        bt.onclick=()=>run(b.bot,cmd);
-        actions.appendChild(bt);
+
+    data=j.containers||[];
+    state.textContent=j.total_containers+' containers • '+j.total_bots+' bots';
+    rebuildSelectors();
+
+    containersEl.innerHTML='';
+    for(const c of data){
+      const section=document.createElement('section');
+      section.className='container';
+
+      const head=document.createElement('div');
+      head.className='container-head';
+      head.innerHTML='<h3>'+c.name+'</h3><span class="'+(c.online?'online':'offline')+'">'+(c.online?'ONLINE':'OFFLINE')+'</span>';
+      section.appendChild(head);
+
+      const grid=document.createElement('div');
+      grid.className='grid';
+
+      for(const b of c.bots){
+        const card=document.createElement('div');
+        card.className='card';
+        card.innerHTML='<div class="row"><b>'+b.bot+'</b><span class="'+(b.online?'online':'offline')+'">'+(b.online?'ONLINE':'OFFLINE')+'</span></div><div class="actions"></div>';
+
+        const actions=card.querySelector('.actions');
+        for(const cmd of ['ping','status','uptime','memory','disk','logs']){
+          const bt=document.createElement('button');
+          bt.textContent=cmd;
+          bt.onclick=()=>run(c.name,b.bot,cmd);
+          actions.appendChild(bt);
+        }
+        grid.appendChild(card);
       }
-      grid.appendChild(card);
+
+      section.appendChild(grid);
+      containersEl.appendChild(section);
     }
   }catch(e){
     state.textContent='erro/autenticação';
@@ -250,32 +351,45 @@ async function loadBots(){
 async function runTyped(){
   const raw=commandInput.value.trim();
   if(!raw){out.textContent='Digite um comando.';return;}
+
   const parts=raw.split(/\s+/);
   const cmd=parts.shift().toLowerCase();
   const allowed=['ping','status','uptime','hostname','disk','memory','echo','logs'];
+
   if(!allowed.includes(cmd)){
     out.textContent='Comando não permitido. Use: '+allowed.join(', ');
     return;
   }
+
   let args=parts;
   if(cmd==='logs' && args.length===0) args=['60'];
-  await run(target.value,cmd,args);
-}
-commandInput.addEventListener('keydown',e=>{if(e.key==='Enter')runTyped()});
 
-async function run(bot,command,argsOverride=null){
-  out.textContent='Executando '+command+' em '+bot+'...';
+  await run(containerSel.value,botSel.value,cmd,args);
+}
+
+commandInput.addEventListener('keydown',e=>{
+  if(e.key==='Enter') runTyped();
+});
+
+async function run(container,bot,command,argsOverride=null){
+  out.textContent='Executando '+command+' em '+container+'/'+bot+'...';
   const args=argsOverride ?? (command==='logs'?[60]:[]);
-  const r=await fetch('/api/command',{
-    method:'POST',
-    headers:headers(),
-    body:JSON.stringify({bot,command,args})
-  });
-  const j=await r.json();
-  out.textContent=JSON.stringify(j,null,2);
+
+  try{
+    const r=await fetch('/api/command',{
+      method:'POST',
+      headers:headers(),
+      body:JSON.stringify({container,bot,command,args})
+    });
+    const j=await r.json();
+    out.textContent=JSON.stringify(j,null,2);
+  }catch(e){
+    out.textContent=String(e);
+  }
 }
 
 setInterval(loadBots,5000);
 if(token.value) loadBots();
 </script>
 </body></html>""")
+
