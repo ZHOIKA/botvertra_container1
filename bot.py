@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+import asyncio
+import json
+import os
+import platform
+import shutil
+import socket
+import sys
+import time
+from pathlib import Path
+
+BOT_ID = os.getenv("BOT_ID", "bot-unknown")
+BASE_DIR = Path(__file__).resolve().parent
+STATE_DIR = BASE_DIR / "state"
+LOG_DIR = BASE_DIR / "logs"
+CMD_DIR = BASE_DIR / "commands"
+
+for d in (STATE_DIR, LOG_DIR, CMD_DIR):
+    d.mkdir(exist_ok=True)
+
+STARTED_AT = time.time()
+
+ALLOWED_COMMANDS = {
+    "ping",
+    "status",
+    "uptime",
+    "hostname",
+    "disk",
+    "memory",
+    "echo",
+    "stop",
+}
+
+def read_mem():
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as f:
+            data = {}
+            for line in f:
+                key, value = line.split(":", 1)
+                data[key] = value.strip()
+            return {
+                "MemTotal": data.get("MemTotal"),
+                "MemAvailable": data.get("MemAvailable"),
+            }
+    except Exception as e:
+        return {"error": str(e)}
+
+def execute_command(payload: dict):
+    cmd = str(payload.get("command", "")).strip().lower()
+    args = payload.get("args", [])
+
+    if cmd not in ALLOWED_COMMANDS:
+        return {
+            "ok": False,
+            "bot": BOT_ID,
+            "error": f"command_not_allowed: {cmd}",
+            "allowed": sorted(ALLOWED_COMMANDS),
+        }
+
+    if cmd == "ping":
+        return {"ok": True, "bot": BOT_ID, "result": "pong"}
+
+    if cmd == "status":
+        return {
+            "ok": True,
+            "bot": BOT_ID,
+            "status": "online",
+            "pid": os.getpid(),
+            "python": sys.version.split()[0],
+            "platform": platform.platform(),
+        }
+
+    if cmd == "uptime":
+        return {
+            "ok": True,
+            "bot": BOT_ID,
+            "uptime_seconds": round(time.time() - STARTED_AT, 2),
+        }
+
+    if cmd == "hostname":
+        return {"ok": True, "bot": BOT_ID, "hostname": socket.gethostname()}
+
+    if cmd == "disk":
+        total, used, free = shutil.disk_usage("/")
+        return {
+            "ok": True,
+            "bot": BOT_ID,
+            "disk": {
+                "total_mb": total // 1024 // 1024,
+                "used_mb": used // 1024 // 1024,
+                "free_mb": free // 1024 // 1024,
+            },
+        }
+
+    if cmd == "memory":
+        return {"ok": True, "bot": BOT_ID, "memory": read_mem()}
+
+    if cmd == "echo":
+        return {
+            "ok": True,
+            "bot": BOT_ID,
+            "result": " ".join(str(x) for x in args)[:500],
+        }
+
+    if cmd == "stop":
+        return {"ok": True, "bot": BOT_ID, "result": "stopping", "_stop": True}
+
+    return {"ok": False, "bot": BOT_ID, "error": "unknown"}
+
+async def process_inbox():
+    inbox = CMD_DIR / f"{BOT_ID}.json"
+    outbox = CMD_DIR / f"{BOT_ID}.out.json"
+
+    while True:
+        if inbox.exists():
+            try:
+                payload = json.loads(inbox.read_text(encoding="utf-8"))
+                result = execute_command(payload)
+                outbox.write_text(json.dumps(result, indent=2), encoding="utf-8")
+                inbox.unlink(missing_ok=True)
+
+                with open(LOG_DIR / f"{BOT_ID}.log", "a", encoding="utf-8") as log:
+                    log.write(json.dumps({
+                        "ts": time.time(),
+                        "input": payload,
+                        "output": result
+                    }) + "\n")
+
+                if result.get("_stop"):
+                    break
+            except Exception as e:
+                err = {"ok": False, "bot": BOT_ID, "error": str(e)}
+                outbox.write_text(json.dumps(err, indent=2), encoding="utf-8")
+                inbox.unlink(missing_ok=True)
+
+        await asyncio.sleep(0.5)
+
+async def main():
+    state = {
+        "bot": BOT_ID,
+        "pid": os.getpid(),
+        "started_at": time.time(),
+    }
+    (STATE_DIR / f"{BOT_ID}.json").write_text(json.dumps(state, indent=2), encoding="utf-8")
+    print(f"[{BOT_ID}] online pid={os.getpid()}", flush=True)
+    try:
+        await process_inbox()
+    finally:
+        (STATE_DIR / f"{BOT_ID}.json").unlink(missing_ok=True)
+        print(f"[{BOT_ID}] offline", flush=True)
+
+if __name__ == "__main__":
+    asyncio.run(main())
