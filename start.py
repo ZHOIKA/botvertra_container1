@@ -2,6 +2,7 @@
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -14,6 +15,14 @@ for directory in (LOG_DIR, PID_DIR, STATE_DIR, CMD_DIR):
     directory.mkdir(exist_ok=True)
 
 processes = []
+
+# Controller HTTP (fica no stdout principal da plataforma)
+controller = subprocess.Popen(
+    [sys.executable, str(BASE_DIR / "controller.py")],
+    cwd=str(BASE_DIR),
+    env=os.environ.copy(),
+)
+print(f"[manager] controller iniciado pid={controller.pid}", flush=True)
 
 for i in range(1, 21):
     bot_id = f"bot-{i:02d}"
@@ -39,26 +48,22 @@ print(f"[manager] {len(processes)} bots iniciados", flush=True)
 
 try:
     while True:
-        alive = 0
+        if controller.poll() is not None:
+            raise SystemExit(f"Controller HTTP encerrou com codigo {controller.returncode}")
 
-        for bot_id, proc, log_file in processes:
-            code = proc.poll()
-            if code is None:
-                alive += 1
-            else:
-                print(f"[{bot_id}] encerrou com código {code}", flush=True)
-
+        alive = sum(1 for _, proc, _ in processes if proc.poll() is None)
         if alive == 0:
             raise SystemExit("Todos os bots foram encerrados")
 
-        # Mantém o processo principal vivo para a plataforma
-        import time
         time.sleep(5)
 
 except KeyboardInterrupt:
-    print("[manager] encerrando bots...", flush=True)
+    print("[manager] encerrando...", flush=True)
 
 finally:
+    if controller.poll() is None:
+        controller.terminate()
+
     for bot_id, proc, log_file in processes:
         if proc.poll() is None:
             proc.terminate()
@@ -69,5 +74,10 @@ finally:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+    try:
+        controller.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        controller.kill()
 
     print("[manager] finalizado", flush=True)
