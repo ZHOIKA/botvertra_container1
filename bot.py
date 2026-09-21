@@ -8,10 +8,13 @@ import socket
 import sys
 import time
 import urllib.request
+import requests
 from pathlib import Path
 
 BOT_ID = os.getenv("BOT_ID", "bot-unknown")
 BOT_PROXY = os.getenv("BOT_PROXY", "").strip()
+TOR_SOCKS_URL = os.getenv("TOR_SOCKS_URL", "").strip()
+TOR_ISOLATION_ID = os.getenv("TOR_ISOLATION_ID", BOT_ID).strip()
 BASE_DIR = Path(__file__).resolve().parent
 STATE_DIR = BASE_DIR / "state"
 LOG_DIR = BASE_DIR / "logs"
@@ -21,7 +24,7 @@ for d in (STATE_DIR, LOG_DIR, CMD_DIR):
     d.mkdir(exist_ok=True)
 
 STARTED_AT = time.time()
-WORKER_BUILD = "proxy-routing-v1"
+WORKER_BUILD = "tor-isolation-v1"
 
 ALLOWED_COMMANDS = {
     "ping", "status", "uptime", "hostname",
@@ -51,6 +54,22 @@ def build_url_opener():
         return urllib.request.build_opener(handler)
     return urllib.request.build_opener()
 
+def build_requests_proxies():
+    if TOR_SOCKS_URL:
+        base = TOR_SOCKS_URL
+        if "://" not in base:
+            base = "socks5h://" + base
+        scheme, rest = base.split("://", 1)
+        if "@" in rest:
+            rest = rest.split("@", 1)[1]
+        isolated = f"{scheme}://{TOR_ISOLATION_ID}:x@{rest}"
+        return {"http": isolated, "https": isolated}
+
+    if BOT_PROXY:
+        return {"http": BOT_PROXY, "https": BOT_PROXY}
+
+    return {}
+
 def check_google_internet():
     target = "www.google.com"
     url = "https://www.google.com/generate_204"
@@ -74,8 +93,14 @@ def check_google_internet():
             headers={"User-Agent": "BotVertra-Connectivity/1.0"},
             method="GET",
         )
-        with build_url_opener().open(req, timeout=5) as response:
-            status = int(response.status)
+        proxies = build_requests_proxies()
+        response = requests.get(
+            url,
+            headers={"User-Agent": "BotVertra-Connectivity/1.0"},
+            timeout=8,
+            proxies=proxies,
+        )
+        status = int(response.status_code)
 
         latency_ms = round((time.perf_counter() - started) * 1000, 1)
         return {
@@ -109,8 +134,15 @@ def get_public_ip():
             headers={"User-Agent": "BotVertra-IPCheck/1.0"},
             method="GET",
         )
-        with build_url_opener().open(req, timeout=5) as response:
-            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+        proxies = build_requests_proxies()
+        response = requests.get(
+            url,
+            headers={"User-Agent": "BotVertra-IPCheck/1.0"},
+            timeout=8,
+            proxies=proxies,
+        )
+        response.raise_for_status()
+        payload = response.json()
         ip = str(payload.get("ip", "")).strip()
         return {
             "ok": bool(ip),
@@ -161,6 +193,8 @@ def execute_command(payload: dict):
             "worker_build": WORKER_BUILD,
             "features": sorted(ALLOWED_COMMANDS),
             "proxy_configured": bool(BOT_PROXY),
+            "tor_configured": bool(TOR_SOCKS_URL),
+            "tor_isolation_id": TOR_ISOLATION_ID if TOR_SOCKS_URL else None,
         }
 
     if cmd == "uptime":
