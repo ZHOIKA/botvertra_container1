@@ -20,6 +20,7 @@ for d in (STATE_DIR, LOG_DIR, CMD_DIR):
     d.mkdir(exist_ok=True)
 
 STARTED_AT = time.time()
+WORKER_BUILD = "internet-v2"
 
 ALLOWED_COMMANDS = {
     "ping", "status", "uptime", "hostname",
@@ -121,6 +122,8 @@ def execute_command(payload: dict):
             "pid": os.getpid(),
             "python": sys.version.split()[0],
             "platform": platform.platform(),
+            "worker_build": WORKER_BUILD,
+            "features": sorted(ALLOWED_COMMANDS),
         }
 
     if cmd == "uptime":
