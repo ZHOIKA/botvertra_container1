@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 import os
+import urllib.request
+import tarfile
+import platform
+import hashlib
 import shutil
 import socket
 import subprocess
@@ -20,6 +24,15 @@ processes = []
 TOR_TEST_BOT = "bot-01"
 TOR_TEST_PORT = 19050
 TOR_STATE_FILE = STATE_DIR / "tor-test.json"
+TOR_BUNDLE_VERSION = "15.0.23"
+TOR_BUNDLE_NAME = f"tor-expert-bundle-linux-x86_64-{TOR_BUNDLE_VERSION}.tar.gz"
+TOR_BUNDLE_SHA256 = "08d49de27f542b8f73e2014e064d8320562b5d20019c03d4725c5a5249d97985"
+TOR_BUNDLE_URLS = [
+    f"https://dist.torproject.org/torbrowser/{TOR_BUNDLE_VERSION}/{TOR_BUNDLE_NAME}",
+    f"https://archive.torproject.org/tor-package-archive/torbrowser/{TOR_BUNDLE_VERSION}/{TOR_BUNDLE_NAME}",
+]
+TOR_VENDOR_DIR = BASE_DIR / ".local" / "tor-expert"
+TOR_ARCHIVE_PATH = STATE_DIR / TOR_BUNDLE_NAME
 tor_process = None
 tor_socks_url = ""
 
@@ -43,83 +56,165 @@ def wait_port(host, port, timeout=20):
             time.sleep(0.25)
     return False
 
-def ensure_tor_binary():
-    existing = shutil.which("tor")
-    if existing:
-        write_tor_state("tor_binary_found", True, existing)
-        return existing
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while True:
+            chunk = fh.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
 
-    apt = shutil.which("apt-get")
-    apk = shutil.which("apk")
-    dnf = shutil.which("dnf")
-    yum = shutil.which("yum")
-    if not any((apt, apk, dnf, yum)):
-        write_tor_state("package_manager_missing", False, "apt-get/apk/dnf/yum nao encontrados")
-        print("[tor-test] gerenciador de pacotes nao encontrado", flush=True)
+def find_bundled_tor(root):
+    preferred = root / "tor" / "tor"
+    candidates = [preferred] if preferred.exists() else []
+    candidates += [
+        path for path in root.rglob("tor")
+        if path.is_file() and path not in candidates
+    ]
+    for candidate in candidates:
+        try:
+            candidate.chmod(candidate.stat().st_mode | 0o111)
+        except OSError:
+            pass
+        if os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+def tor_runtime_env(tor_bin):
+    env = os.environ.copy()
+    library_dirs = []
+    root = TOR_VENDOR_DIR
+    for path in root.rglob("*.so*"):
+        parent = str(path.parent)
+        if parent not in library_dirs:
+            library_dirs.append(parent)
+    if library_dirs:
+        old = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = ":".join(library_dirs + ([old] if old else []))
+    env["HOME"] = str(BASE_DIR)
+    return env
+
+def safe_extract_tar(archive_path, destination):
+    destination.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(archive_path, "r:gz") as tf:
+        try:
+            tf.extractall(destination, filter="data")
+        except TypeError:
+            root = destination.resolve()
+            for member in tf.getmembers():
+                target = (destination / member.name).resolve()
+                if target != root and root not in target.parents:
+                    raise RuntimeError(f"unsafe_archive_member: {member.name}")
+            tf.extractall(destination)
+
+def download_tor_bundle():
+    if TOR_ARCHIVE_PATH.exists():
+        current = sha256_file(TOR_ARCHIVE_PATH)
+        if current == TOR_BUNDLE_SHA256:
+            write_tor_state("bundle_cached", True, f"sha256={current}")
+            return True
+        TOR_ARCHIVE_PATH.unlink(missing_ok=True)
+
+    tmp_path = TOR_ARCHIVE_PATH.with_suffix(TOR_ARCHIVE_PATH.suffix + ".part")
+    tmp_path.unlink(missing_ok=True)
+    errors = []
+
+    for url in TOR_BUNDLE_URLS:
+        try:
+            write_tor_state("bundle_downloading", False, url)
+            request = urllib.request.Request(
+                url,
+                headers={"User-Agent": "BotVertra-TorTest/1.0"},
+                method="GET",
+            )
+            total = 0
+            with urllib.request.urlopen(request, timeout=90) as response, open(tmp_path, "wb") as out:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > 64 * 1024 * 1024:
+                        raise RuntimeError("bundle_too_large")
+                    out.write(chunk)
+
+            actual = sha256_file(tmp_path)
+            if actual != TOR_BUNDLE_SHA256:
+                raise RuntimeError(
+                    f"sha256_mismatch expected={TOR_BUNDLE_SHA256} actual={actual}"
+                )
+            os.replace(tmp_path, TOR_ARCHIVE_PATH)
+            write_tor_state("bundle_verified", True, f"{url} sha256={actual}")
+            return True
+        except Exception as exc:
+            errors.append(f"{url}: {exc}")
+            tmp_path.unlink(missing_ok=True)
+
+    write_tor_state("bundle_download_failed", False, " | ".join(errors))
+    return False
+
+def ensure_tor_binary():
+    system_tor = shutil.which("tor")
+    if system_tor:
+        write_tor_state("tor_binary_found", True, system_tor)
+        return system_tor
+
+    machine = platform.machine().lower()
+    if machine not in ("x86_64", "amd64"):
+        write_tor_state("unsupported_arch", False, f"arquitetura={machine}")
         return None
 
-    install_log_path = LOG_DIR / "tor-install.log"
-    env = os.environ.copy()
-    env["DEBIAN_FRONTEND"] = "noninteractive"
+    bundled = find_bundled_tor(TOR_VENDOR_DIR)
+    if bundled:
+        write_tor_state("bundled_tor_found", True, str(bundled))
+        return str(bundled)
 
-    if hasattr(os, "geteuid") and os.geteuid() == 0:
-        prefix = []
-    else:
-        sudo = shutil.which("sudo")
-        if not sudo:
-            write_tor_state("install_permission_denied", False, "sem root e sem sudo")
-            print("[tor-test] sem root/sudo para instalar Tor automaticamente", flush=True)
-            return None
-        prefix = [sudo, "-n"]
-
-    if apt:
-        commands = [
-            prefix + [apt, "update"],
-            prefix + [apt, "install", "-y", "--no-install-recommends", "tor"],
-        ]
-    elif apk:
-        commands = [prefix + [apk, "add", "--no-cache", "tor"]]
-    elif dnf:
-        commands = [prefix + [dnf, "install", "-y", "tor"]]
-    else:
-        commands = [prefix + [yum, "install", "-y", "tor"]]
+    if not download_tor_bundle():
+        return None
 
     try:
-        with open(install_log_path, "ab", buffering=0) as install_log:
-            for cmd in commands:
-                result = subprocess.run(
-                    cmd,
-                    cwd=str(BASE_DIR),
-                    env=env,
-                    stdout=install_log,
-                    stderr=subprocess.STDOUT,
-                    timeout=120,
-                    check=False,
-                )
-                if result.returncode != 0:
-                    write_tor_state(
-                        "install_failed",
-                        False,
-                        f"comando={' '.join(cmd)} rc={result.returncode}; veja logs/tor-install.log",
-                    )
-                    print(
-                        f"[tor-test] instalacao do Tor falhou rc={result.returncode}; veja logs/tor-install.log",
-                        flush=True,
-                    )
-                    return None
+        if TOR_VENDOR_DIR.exists():
+            shutil.rmtree(TOR_VENDOR_DIR)
+        safe_extract_tar(TOR_ARCHIVE_PATH, TOR_VENDOR_DIR)
     except Exception as exc:
-        write_tor_state("install_exception", False, str(exc))
-        print(f"[tor-test] erro instalando Tor: {exc}", flush=True)
+        write_tor_state("bundle_extract_failed", False, str(exc))
         return None
 
-    installed = shutil.which("tor")
-    if installed:
-        write_tor_state("tor_installed", True, installed)
-        print("[tor-test] Tor instalado automaticamente", flush=True)
-    else:
-        write_tor_state("tor_binary_missing_after_install", False, "pacote instalou mas binario nao apareceu no PATH")
-        print("[tor-test] pacote instalado, mas binario tor nao apareceu no PATH", flush=True)
-    return installed
+    bundled = find_bundled_tor(TOR_VENDOR_DIR)
+    if not bundled:
+        write_tor_state(
+            "bundle_tor_missing",
+            False,
+            "bundle extraido, mas o executavel tor nao foi localizado",
+        )
+        return None
+
+    try:
+        version_result = subprocess.run(
+            [str(bundled), "--version"],
+            cwd=str(bundled.parent),
+            env=tor_runtime_env(bundled),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        detail = version_result.stdout.strip().replace("\n", " ")[:500]
+        if version_result.returncode != 0:
+            write_tor_state(
+                "bundled_tor_exec_failed",
+                False,
+                f"rc={version_result.returncode} {detail}",
+            )
+            return None
+        write_tor_state("bundled_tor_ready", True, detail or str(bundled))
+        return str(bundled)
+    except Exception as exc:
+        write_tor_state("bundled_tor_exec_exception", False, str(exc))
+        return None
 
 configured_tor = os.getenv("TOR_TEST_SOCKS_URL", "").strip()
 if configured_tor:
@@ -132,14 +227,18 @@ else:
         tor_data = BASE_DIR / "tor-data"
         tor_data.mkdir(exist_ok=True)
         tor_log = open(LOG_DIR / "tor-test.log", "ab", buffering=0)
+        tor_bin_path = Path(tor_bin)
+        tor_env = tor_runtime_env(tor_bin_path) if str(tor_bin_path).startswith(str(TOR_VENDOR_DIR)) else os.environ.copy()
         tor_process = subprocess.Popen(
             [
                 tor_bin,
+                "--ClientOnly", "1",
                 "--SocksPort", f"127.0.0.1:{TOR_TEST_PORT} IsolateSOCKSAuth",
                 "--DataDirectory", str(tor_data),
                 "--Log", "notice stdout",
             ],
-            cwd=str(BASE_DIR),
+            cwd=str(tor_bin_path.parent),
+            env=tor_env,
             stdout=tor_log,
             stderr=subprocess.STDOUT,
         )
@@ -155,7 +254,7 @@ else:
             write_tor_state("tor_binary_unavailable", False, "nao foi possivel localizar/instalar o binario Tor")
         print("[tor-test] binario Tor nao encontrado na imagem da Vertra", flush=True)
 
-print("[manager] build=container1-tor-test-v3", flush=True)
+print("[manager] build=container1-tor-userspace-v1", flush=True)
 
 for i in range(1, 21):
     bot_id = f"bot-{i:02d}"
