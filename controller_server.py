@@ -19,6 +19,7 @@ app = FastAPI(title="BotVertra Controller")
 agents = {}
 pending = {}
 agent_locks = {}
+bot_ip_cache = {}
 tor_test_state = {
     "container": "container1",
     "bot": "bot-01",
@@ -28,6 +29,21 @@ tor_test_state = {
     "worker_build": None,
     "error": "aguardando_teste",
 }
+
+def remember_public_ip_result(item):
+    result = item.get("result") if isinstance(item.get("result"), dict) else {}
+    ip = result.get("public_ip")
+    container_name = item.get("container")
+    bot = item.get("bot")
+    if item.get("ok") and ip and container_name and bot:
+        bot_ip_cache[(container_name, bot)] = {
+            "public_ip": str(ip),
+            "checked_at": time.time(),
+        }
+
+def remember_public_ip_results(items):
+    for item in items:
+        remember_public_ip_result(item)
 
 async def run_selftest(label):
     targets = []
@@ -107,6 +123,8 @@ async def run_public_ip_selftest():
         for container_name, bot in targets
     ])
 
+    remember_public_ip_results(results)
+
     ip_to_targets = {}
     failures = []
     for item in results:
@@ -139,6 +157,8 @@ async def run_single_tor_test():
 
     status_item = await execute_one(container_name, bot, "status", [])
     ip_item = await execute_one(container_name, bot, "public_ip", [])
+
+    remember_public_ip_result(ip_item)
 
     status_result = status_item.get("result") if isinstance(status_item.get("result"), dict) else {}
     ip_result = ip_item.get("result") if isinstance(ip_item.get("result"), dict) else {}
@@ -188,11 +208,22 @@ async def delayed_public_ip_test():
     await asyncio.sleep(45)
     await run_public_ip_selftest()
 
+async def periodic_ip_cache_refresh():
+    # Dá tempo para os bridges reconectarem após deploy/restart.
+    await asyncio.sleep(150)
+    while True:
+        try:
+            await run_public_ip_selftest()
+        except Exception as exc:
+            print(f"[ip-cache] refresh falhou: {exc}", flush=True)
+        await asyncio.sleep(120)
+
 @app.on_event("startup")
 async def start_selftest():
     asyncio.create_task(delayed_selftest())
     asyncio.create_task(delayed_public_ip_test())
     asyncio.create_task(delayed_tor_test())
+    asyncio.create_task(periodic_ip_cache_refresh())
 ALLOWED = {
     "ping", "status", "uptime", "hostname",
     "disk", "memory", "echo", "logs", "internet", "public_ip"
@@ -225,6 +256,8 @@ def snapshot():
                 {
                     "bot": bot,
                     "online": connected,
+                    "public_ip": bot_ip_cache.get((name, bot), {}).get("public_ip"),
+                    "public_ip_checked_at": bot_ip_cache.get((name, bot), {}).get("checked_at", 0),
                     "tor_test": name == "container1" and bot == "bot-01",
                     "tor_test_state": tor_test_state if name == "container1" and bot == "bot-01" else None,
                 }
@@ -322,6 +355,8 @@ async def collect_ip_audit(container_filter="all"):
         execute_one(container_name, bot, "public_ip", [])
         for container_name, bot in targets
     ])
+
+    remember_public_ip_results(results)
 
     ip_to_targets = {}
     failures = []
@@ -428,6 +463,9 @@ async def command(data: Command, authorization: str | None = Header(default=None
         execute_one(container_name, bot, command_name, data.args)
         for container_name, bot in targets
     ])
+
+    if command_name == "public_ip":
+        remember_public_ip_results(results)
 
     succeeded = sum(1 for item in results if item.get("ok"))
     failed = len(results) - succeeded
@@ -662,6 +700,8 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .bot-head{display:flex;justify-content:space-between;gap:8px;align-items:center}
 .bot-name{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;font-weight:700}
 .bot-status{font-size:10px;color:var(--green)}
+.bot-ip{margin-top:7px;padding:6px 8px;border-radius:8px;border:1px solid rgba(106,169,255,.18);background:rgba(106,169,255,.07);color:#9cc4ff;font-size:10px;line-height:1.35;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.bot-ip.pending{color:var(--muted);border-color:var(--border);background:rgba(255,255,255,.02)}
 .tor-note{margin-top:7px;padding:6px 8px;border-radius:8px;border:1px solid rgba(169,139,255,.22);background:rgba(169,139,255,.08);color:#c8b8ff;font-size:10px;line-height:1.35}
 .bot-actions{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;margin-top:10px}
 .bot-actions button{
@@ -1028,6 +1068,10 @@ function renderContainers(){
 
       head.append(botName,botState);
 
+      const ipLine=document.createElement('div');
+      ipLine.className='bot-ip'+(b.public_ip?'':' pending');
+      ipLine.textContent=b.public_ip ? 'IP • '+b.public_ip : 'IP • aguardando leitura';
+
       const actions=document.createElement('div');
       actions.className='bot-actions';
       for(const cmd of ['ping','status','memory','disk','uptime','internet','public_ip','logs']){
@@ -1050,9 +1094,9 @@ function renderContainers(){
         }else{
           note.textContent='TOR TEST • aguardando verificação';
         }
-        bot.append(head,note,actions);
+        bot.append(head,ipLine,note,actions);
       }else{
-        bot.append(head,actions);
+        bot.append(head,ipLine,actions);
       }
       grid.appendChild(bot);
     }
