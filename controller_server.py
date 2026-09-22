@@ -21,6 +21,12 @@ pending = {}
 agent_locks = {}
 bot_ip_cache = {}
 dashboard_clients = set()
+
+# Painel conservador: evita alertas com amostra velha ou falha transitória.
+IP_CACHE_TTL = 240
+OFFLINE_GRACE_SECONDS = 20
+DUPLICATE_CONFIRMATIONS = 2
+TRANSIENT_ERRORS = {"bot_timeout", "local_timeout", "lock_timeout", "invalid_local_response"}
 tor_test_state = {
     "container": "container1",
     "bot": "bot-01",
@@ -37,9 +43,18 @@ def remember_public_ip_result(item):
     container_name = item.get("container")
     bot = item.get("bot")
     if item.get("ok") and ip and container_name and bot:
-        bot_ip_cache[(container_name, bot)] = {
-            "public_ip": str(ip),
+        key = (container_name, bot)
+        previous = bot_ip_cache.get(key, {})
+        ip = str(ip)
+        stable_count = (
+            int(previous.get("stable_count", 0)) + 1
+            if previous.get("public_ip") == ip
+            else 1
+        )
+        bot_ip_cache[key] = {
+            "public_ip": ip,
             "checked_at": time.time(),
+            "stable_count": stable_count,
         }
 
 def remember_public_ip_results(items):
@@ -59,7 +74,7 @@ async def run_selftest(label):
         return
 
     results = await asyncio.gather(*[
-        execute_one(container_name, bot, "ping", [])
+        execute_verified(container_name, bot, "ping", [])
         for container_name, bot in targets
     ])
 
@@ -90,7 +105,7 @@ async def run_internet_selftest():
         return
 
     results = await asyncio.gather(*[
-        execute_one(container_name, bot, "internet", [])
+        execute_verified(container_name, bot, "internet", [])
         for container_name, bot in targets
     ])
 
@@ -120,7 +135,7 @@ async def run_public_ip_selftest():
         return
 
     results = await asyncio.gather(*[
-        execute_one(container_name, bot, "public_ip", [])
+        execute_verified(container_name, bot, "public_ip", [])
         for container_name, bot in targets
     ])
 
@@ -157,8 +172,8 @@ async def run_single_tor_test():
     container_name = "container1"
     bot = "bot-01"
 
-    status_item = await execute_one(container_name, bot, "status", [])
-    ip_item = await execute_one(container_name, bot, "public_ip", [])
+    status_item = await execute_verified(container_name, bot, "status", [])
+    ip_item = await execute_verified(container_name, bot, "public_ip", [])
 
     remember_public_ip_result(ip_item)
 
@@ -249,37 +264,73 @@ class IPAuditRequest(BaseModel):
 
 def snapshot():
     result = []
+    now = time.time()
 
+    # Só dados atuais, de bots registrados em containers conectados, podem gerar alerta.
     ip_counts = {}
-    for (container_name, bot_name), item in bot_ip_cache.items():
-        ip = item.get("public_ip")
-        if ip:
-            ip_counts[ip] = ip_counts.get(ip, 0) + 1
+    for name, agent in agents.items():
+        if agent.get("ws") is None:
+            continue
+        for bot in agent.get("bots", set()):
+            cached = bot_ip_cache.get((name, bot), {})
+            ip = cached.get("public_ip")
+            fresh = bool(ip and now - cached.get("checked_at", 0) <= IP_CACHE_TTL)
+            stable = int(cached.get("stable_count", 0)) >= DUPLICATE_CONFIRMATIONS
+            if fresh and stable:
+                ip_counts[ip] = ip_counts.get(ip, 0) + 1
+
     for name in sorted(agents):
         item = agents[name]
         connected = item.get("ws") is not None
+        disconnected_at = item.get("disconnected_at", 0) or 0
+        in_grace = bool(
+            not connected
+            and disconnected_at
+            and now - disconnected_at < OFFLINE_GRACE_SECONDS
+        )
+        effective_online = connected or in_grace
+        connection_state = "online" if connected else ("reconnecting" if in_grace else "offline")
+
+        bots_payload = []
+        for bot in sorted(item.get("bots", set())):
+            cached = bot_ip_cache.get((name, bot), {})
+            ip = cached.get("public_ip")
+            checked_at = cached.get("checked_at", 0) or 0
+            fresh = bool(ip and now - checked_at <= IP_CACHE_TTL)
+            stable_count = int(cached.get("stable_count", 0))
+            confirmed_sample = fresh and stable_count >= DUPLICATE_CONFIRMATIONS
+            shared_count = ip_counts.get(ip, 0) if confirmed_sample and connected else 0
+            duplicate = bool(shared_count > 1)
+
+            if not ip:
+                confidence = "unknown"
+            elif not fresh:
+                confidence = "stale"
+            elif stable_count < DUPLICATE_CONFIRMATIONS:
+                confidence = "warming"
+            else:
+                confidence = "confirmed"
+
+            bots_payload.append({
+                "bot": bot,
+                "online": effective_online,
+                "connection_state": connection_state,
+                "public_ip": ip,
+                "public_ip_checked_at": checked_at,
+                "ip_fresh": fresh,
+                "ip_confidence": confidence,
+                "ip_duplicate": duplicate,
+                "ip_shared_count": shared_count,
+                "tor_test": name == "container1" and bot == "bot-01",
+                "tor_test_state": tor_test_state if name == "container1" and bot == "bot-01" else None,
+            })
+
         result.append({
             "name": name,
-            "online": connected,
+            "online": effective_online,
+            "connection_state": connection_state,
             "last_seen": item.get("last_seen", 0),
-            "bots": [
-                {
-                    "bot": bot,
-                    "online": connected,
-                    "public_ip": bot_ip_cache.get((name, bot), {}).get("public_ip"),
-                    "public_ip_checked_at": bot_ip_cache.get((name, bot), {}).get("checked_at", 0),
-                    "ip_duplicate": bool(
-                        bot_ip_cache.get((name, bot), {}).get("public_ip")
-                        and ip_counts.get(bot_ip_cache.get((name, bot), {}).get("public_ip"), 0) > 1
-                    ),
-                    "ip_shared_count": ip_counts.get(
-                        bot_ip_cache.get((name, bot), {}).get("public_ip"), 0
-                    ),
-                    "tor_test": name == "container1" and bot == "bot-01",
-                    "tor_test_state": tor_test_state if name == "container1" and bot == "bot-01" else None,
-                }
-                for bot in sorted(item.get("bots", set()))
-            ],
+            "bots": bots_payload,
         })
     return result
 
@@ -385,6 +436,25 @@ async def bots(authorization: str | None = Header(default=None)):
         "total_bots": sum(len(x["bots"]) for x in data),
     }
 
+def result_error(item):
+    result = item.get("result") if isinstance(item.get("result"), dict) else {}
+    error = item.get("error") or result.get("error")
+    if isinstance(error, str) and error.startswith("invalid_local_response"):
+        return "invalid_local_response"
+    return error
+
+async def execute_verified(container_name, bot, command_name, args, retries=1):
+    """Repete somente falhas transitórias antes de mostrá-las como reais."""
+    item = await execute_one(container_name, bot, command_name, args)
+    attempt = 0
+    while attempt < retries and not item.get("ok") and result_error(item) in TRANSIENT_ERRORS:
+        attempt += 1
+        await asyncio.sleep(0.45)
+        item = await execute_one(container_name, bot, command_name, args)
+    if attempt:
+        item["verification_attempts"] = attempt + 1
+    return item
+
 async def execute_one(container_name, bot, command_name, args):
     agent = agents.get(container_name)
     if not agent:
@@ -438,7 +508,9 @@ async def request_agent_rotation(container_name, bot, reason="bot_timeout"):
     if ws is None:
         return False
     try:
-        await ws.send_text(json.dumps({"type": "rotate", "bot": bot, "reason": reason}))
+        lock = agent_locks.setdefault(container_name, asyncio.Lock())
+        async with lock:
+            await ws.send_text(json.dumps({"type": "rotate", "bot": bot, "reason": reason}))
         print(f"[rotate] {container_name}/{bot} solicitado ({reason})", flush=True)
         return True
     except Exception as exc:  # noqa: BLE001
@@ -466,20 +538,19 @@ async def collect_ip_audit(container_filter="all"):
     if not targets:
         raise HTTPException(status_code=404, detail="no_targets")
 
-    results = await asyncio.gather(*[
-        execute_one(container_name, bot, "public_ip", [])
+    first_results = await asyncio.gather(*[
+        execute_verified(container_name, bot, "public_ip", [])
         for container_name, bot in targets
     ])
+    remember_public_ip_results(first_results)
 
-    remember_public_ip_results(results)
-
-    ip_to_targets = {}
+    first_map = {}
     failures = []
-    for item in results:
+    for item in first_results:
         result = item.get("result") if isinstance(item.get("result"), dict) else {}
         ip = result.get("public_ip")
         if item.get("ok") and ip:
-            ip_to_targets.setdefault(ip, []).append({
+            first_map.setdefault(str(ip), []).append({
                 "container": item.get("container"),
                 "bot": item.get("bot"),
             })
@@ -487,34 +558,84 @@ async def collect_ip_audit(container_filter="all"):
             failures.append({
                 "container": item.get("container"),
                 "bot": item.get("bot"),
-                "error": item.get("error") or result.get("error") or "public_ip_failed",
+                "error": result_error(item) or "public_ip_failed",
             })
 
-    duplicate_groups = [
-        {"ip": ip, "count": len(owners), "bots": owners}
-        for ip, owners in sorted(ip_to_targets.items())
-        if len(owners) > 1
+    # Segunda leitura apenas dos candidatos a duplicidade.
+    candidate_groups = {
+        ip: owners for ip, owners in first_map.items() if len(owners) > 1
+    }
+    confirm_targets = [
+        (owner["container"], owner["bot"])
+        for owners in candidate_groups.values()
+        for owner in owners
     ]
+
+    confirmed_groups = []
+    rejected_candidates = []
+
+    if confirm_targets:
+        await asyncio.sleep(0.65)
+        second_results = await asyncio.gather(*[
+            execute_verified(container_name, bot, "public_ip", [])
+            for container_name, bot in confirm_targets
+        ])
+        remember_public_ip_results(second_results)
+
+        second_by_target = {}
+        for item in second_results:
+            result = item.get("result") if isinstance(item.get("result"), dict) else {}
+            second_by_target[(item.get("container"), item.get("bot"))] = (
+                str(result.get("public_ip")) if item.get("ok") and result.get("public_ip") else None
+            )
+
+        for ip, owners in sorted(candidate_groups.items()):
+            still_same = [
+                owner for owner in owners
+                if second_by_target.get((owner["container"], owner["bot"])) == ip
+            ]
+            if len(still_same) > 1:
+                confirmed_groups.append({
+                    "ip": ip,
+                    "count": len(still_same),
+                    "bots": still_same,
+                    "confirmed": True,
+                })
+            else:
+                rejected_candidates.append({
+                    "ip": ip,
+                    "first_count": len(owners),
+                    "confirmed_count": len(still_same),
+                    "bots": owners,
+                })
+
+    confirmed_ips = {group["ip"] for group in confirmed_groups}
     unique_groups = [
         {"ip": ip, "count": 1, "bots": owners}
-        for ip, owners in sorted(ip_to_targets.items())
+        for ip, owners in sorted(first_map.items())
         if len(owners) == 1
     ]
 
-    duplicate_bot_count = sum(group["count"] for group in duplicate_groups)
+    duplicate_bot_count = sum(group["count"] for group in confirmed_groups)
+
+    await broadcast_dashboard()
 
     return {
         "ok": len(failures) == 0,
         "scope": container_filter,
-        "checked": len(results),
-        "successful": len(results) - len(failures),
+        "checked": len(first_results),
+        "successful": len(first_results) - len(failures),
         "failed": len(failures),
-        "distinct_ips": len(ip_to_targets),
-        "duplicate_ip_count": len(duplicate_groups),
+        "distinct_ips": len(first_map),
+        "duplicate_ip_count": len(confirmed_groups),
         "duplicate_bot_count": duplicate_bot_count,
-        "duplicate_groups": duplicate_groups,
+        "duplicate_groups": confirmed_groups,
+        "candidate_duplicate_ip_count": len(candidate_groups),
+        "rejected_candidate_count": len(rejected_candidates),
+        "rejected_candidates": rejected_candidates,
         "unique_groups": unique_groups,
         "failures": failures,
+        "confirmation_rounds": 2,
         "checked_at": time.time(),
     }
 
@@ -575,7 +696,7 @@ async def command(data: Command, authorization: str | None = Header(default=None
         raise HTTPException(status_code=400, detail="too_many_targets")
 
     results = await asyncio.gather(*[
-        execute_one(container_name, bot, command_name, data.args)
+        execute_verified(container_name, bot, command_name, data.args)
         for container_name, bot in targets
     ])
 
@@ -636,6 +757,7 @@ async def agent(websocket: WebSocket):
             "ws": websocket,
             "bots": bots,
             "last_seen": time.time(),
+            "disconnected_at": 0,
         }
         agent_locks.setdefault(name, asyncio.Lock())
 
@@ -668,7 +790,8 @@ async def agent(websocket: WebSocket):
             if current and current.get("ws") is websocket:
                 current["ws"] = None
                 current["last_seen"] = time.time()
-                print(f"[agent] {name} desconectado", flush=True)
+                current["disconnected_at"] = time.time()
+                print(f"[agent] {name} desconectado • aguardando {OFFLINE_GRACE_SECONDS}s antes de marcar offline", flush=True)
                 await broadcast_dashboard()
 
 @app.get("/", response_class=HTMLResponse)
@@ -737,6 +860,10 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}
 .dot.online{background:var(--green);box-shadow:0 0 0 4px rgba(86,230,165,.09)}
 .dot.offline{background:var(--red)}
+.dot.reconnecting{background:#f2c14e}
+.badge.reconnecting{color:#f2c14e;border-color:rgba(242,193,78,.28);background:rgba(242,193,78,.08)}
+.bot-ip.stale{opacity:.55}
+.bot-ip.warming{opacity:.78}
 .stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:18px 0}
 .stat{
   background:linear-gradient(180deg,rgba(17,28,43,.94),rgba(11,18,29,.94));
@@ -1180,7 +1307,7 @@ button:disabled{cursor:not-allowed;opacity:.55}
 
       <div class="legend">
         <span><i class="legend-dot"></i> bot online</span>
-        <span><i class="legend-alert"></i> IP compartilhado</span>
+        <span><i class="legend-alert"></i> IP duplicado confirmado</span>
         <span>Toque no card para selecionar no console</span>
       </div>
       <div id="containers" class="containers">
@@ -1569,13 +1696,13 @@ function renderStats(){
 
   const allBots=data.flatMap(c=>c.bots);
   const exclusiveIps=new Set(
-    allBots.filter(b=>b.public_ip && !b.ip_duplicate).map(b=>b.public_ip)
+    allBots.filter(b=>b.public_ip && b.ip_fresh && b.ip_confidence==='confirmed' && !b.ip_duplicate).map(b=>b.public_ip)
   );
   const duplicateBots=allBots.filter(b=>b.ip_duplicate).length;
   statRefresh.textContent=exclusiveIps.size;
   if(statIpSub){
     statIpSub.textContent=duplicateBots
-      ? duplicateBots+' bot'+(duplicateBots===1?'':'s')+' com IP repetido'
+      ? duplicateBots+' bot'+(duplicateBots===1?'':'s')+' com IP repetido confirmado'
       : 'nenhum IP repetido';
   }
 
@@ -1648,8 +1775,9 @@ function renderContainers(){
     topActions.className='container-actions-top';
 
     const badge=document.createElement('span');
-    badge.className='badge '+(c.online?'online':'offline');
-    badge.textContent=(c.online?'● ONLINE':'● OFFLINE');
+    const cState=c.connection_state|| (c.online?'online':'offline');
+    badge.className='badge '+cState;
+    badge.textContent=cState==='online'?'● ONLINE':(cState==='reconnecting'?'● RECONECTANDO':'● OFFLINE');
 
     const toggle=document.createElement('button');
     toggle.type='button';
@@ -1721,15 +1849,17 @@ function renderContainers(){
 
       const botState=document.createElement('span');
       botState.className='bot-status';
-      botState.textContent=b.online?'● online':'● offline';
-      if(!b.online) botState.style.color='var(--red)';
+      const bState=b.connection_state|| (b.online?'online':'offline');
+      botState.textContent=bState==='online'?'● online':(bState==='reconnecting'?'● reconectando':'● offline');
+      if(bState==='offline') botState.style.color='var(--red)';
+      if(bState==='reconnecting') botState.style.color='#f2c14e';
 
       const wifiAlert=document.createElement('span');
       wifiAlert.className='ip-wifi-alert';
       wifiAlert.textContent='';
       wifiAlert.title=b.ip_duplicate
-        ? 'IP compartilhado com '+b.ip_shared_count+' bots'
-        : 'IP exclusivo';
+        ? 'IP duplicado confirmado em duas leituras • '+b.ip_shared_count+' bots'
+        : (b.ip_confidence==='confirmed'?'IP verificado':'IP ainda não confirmado');
       wifiAlert.setAttribute('aria-label',wifiAlert.title);
       wifiAlert.hidden=!b.ip_duplicate;
 
@@ -1737,8 +1867,16 @@ function renderContainers(){
       head.append(botName,stateWrap);
 
       const ipLine=document.createElement('div');
-      ipLine.className='bot-ip'+(b.public_ip?'':' pending');
-      ipLine.textContent=b.public_ip ? 'IP • '+b.public_ip : 'IP • aguardando leitura';
+      ipLine.className='bot-ip'+(b.public_ip?'':' pending')+(b.ip_confidence==='stale'?' stale':'')+(b.ip_confidence==='warming'?' warming':'');
+      if(!b.public_ip){
+        ipLine.textContent='IP • aguardando leitura';
+      }else if(b.ip_confidence==='stale'){
+        ipLine.textContent='IP • '+b.public_ip+' • desatualizado';
+      }else if(b.ip_confidence==='warming'){
+        ipLine.textContent='IP • '+b.public_ip+' • confirmando';
+      }else{
+        ipLine.textContent='IP • '+b.public_ip;
+      }
 
       const actions=document.createElement('div');
       actions.className='bot-actions';
@@ -1872,12 +2010,13 @@ async function auditIPs(container='all'){
     lines.push('Escopo: '+label);
     lines.push('Bots verificados: '+j.successful+'/'+j.checked);
     lines.push('IPs distintos: '+j.distinct_ips);
-    lines.push('IPs duplicados: '+j.duplicate_ip_count);
-    lines.push('Bots em grupos duplicados: '+j.duplicate_bot_count);
+    lines.push('Duplicados confirmados: '+j.duplicate_ip_count);
+    lines.push('Bots em duplicidade confirmada: '+j.duplicate_bot_count);
+    lines.push('Confirmação: '+(j.confirmation_rounds||1)+' leituras');
 
     if(j.duplicate_groups.length){
       lines.push('');
-      lines.push('DUPLICADOS');
+      lines.push('DUPLICADOS CONFIRMADOS');
       for(const group of j.duplicate_groups){
         lines.push('');
         lines.push(group.ip+' • '+group.count+' bots');
@@ -1888,6 +2027,12 @@ async function auditIPs(container='all'){
     }else{
       lines.push('');
       lines.push('✓ Nenhum IP duplicado encontrado neste escopo.');
+    }
+
+    if(j.rejected_candidates && j.rejected_candidates.length){
+      lines.push('');
+      lines.push('CANDIDATOS DESCARTADOS: '+j.rejected_candidates.length);
+      lines.push('Não viraram alerta porque não se repetiram na confirmação.');
     }
 
     if(j.unique_groups.length){
