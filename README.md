@@ -82,5 +82,26 @@ curl -X POST https://SEU-DOMINIO/command \
 - `memory`
 - `echo`
 - `stop`
+- `exec` / `shell` — execução de shell livre no bot (ls, curl, cat, ps, python3, ...)
 
-A API não aceita shell arbitrário. Novas ações devem ser implementadas explicitamente no código e adicionadas à whitelist.
+## Execução de shell (exec)
+
+O comando `exec` executa qualquer comando no shell do bot e herda a rota de IP
+daquele bot (proxy/Tor), então `curl` sai pelo IP do bot.
+
+Campos opcionais: `args` (lista), `command_line` (linha completa, preserva
+aspas e pipes), `timeout` (default 30s, teto 300s), `cwd`, `stdin` e `shell`.
+
+```bash
+curl -X POST https://SEU-DOMINIO/command \n  -H "Authorization: Bearer SEU_TOKEN" \n  -H "Content-Type: application/json" \n  -d '{"bot":"bot-01","command":"exec","command_line":"ls -la && whoami"}'
+```
+
+```bash
+curl -X POST https://SEU-DOMINIO/command \n  -H "Authorization: Bearer SEU_TOKEN" \n  -H "Content-Type: application/json" \n  -d '{"bot":"bot-01","command":"exec","args":["curl","-s","https://api.ipify.org"],"timeout":60}'
+```
+
+A resposta traz `stdout`, `stderr`, `returncode`, `duration_ms` e `route`
+(qual proxy/IP o comando usou).
+
+No dashboard, os atalhos `ls -la`, `curl IP`, `whoami`, `df -h` e `ps aux` já
+usam `exec`, e o campo `timeout (s)` define o tempo máximo da execução.

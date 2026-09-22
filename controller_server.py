@@ -245,8 +245,12 @@ async def start_selftest():
     asyncio.create_task(dashboard_heartbeat())
 ALLOWED = {
     "ping", "status", "uptime", "hostname",
-    "disk", "memory", "echo", "logs", "internet", "public_ip"
+    "disk", "memory", "echo", "logs", "internet", "public_ip",
+    "exec", "shell"
 }
+
+# Comandos que executam shell livre no bot (ls, curl, cat, ps, ...).
+EXEC_COMMANDS = {"exec", "shell"}
 
 def check_auth(value):
     expected = f"Bearer {TOKEN}"
@@ -258,6 +262,21 @@ class Command(BaseModel):
     bot: str
     command: str
     args: list = Field(default_factory=list)
+    timeout: float | None = None
+    cwd: str | None = None
+    stdin: str | None = None
+    command_line: str | None = None
+    shell: str | None = None
+
+
+def command_options(data):
+    """Extrai as opcoes extras do console (usadas pelo comando exec)."""
+    return {
+        key: getattr(data, key)
+        for key in ("timeout", "cwd", "stdin", "command_line", "shell")
+        if getattr(data, key) is not None
+    }
+
 
 class IPAuditRequest(BaseModel):
     container: str = "all"
@@ -443,19 +462,19 @@ def result_error(item):
         return "invalid_local_response"
     return error
 
-async def execute_verified(container_name, bot, command_name, args, retries=1):
+async def execute_verified(container_name, bot, command_name, args, retries=1, extra=None):
     """Repete somente falhas transitórias antes de mostrá-las como reais."""
-    item = await execute_one(container_name, bot, command_name, args)
+    item = await execute_one(container_name, bot, command_name, args, extra)
     attempt = 0
     while attempt < retries and not item.get("ok") and result_error(item) in TRANSIENT_ERRORS:
         attempt += 1
         await asyncio.sleep(0.45)
-        item = await execute_one(container_name, bot, command_name, args)
+        item = await execute_one(container_name, bot, command_name, args, extra)
     if attempt:
         item["verification_attempts"] = attempt + 1
     return item
 
-async def execute_one(container_name, bot, command_name, args):
+async def execute_one(container_name, bot, command_name, args, extra=None):
     agent = agents.get(container_name)
     if not agent:
         return {"ok": False, "container": container_name, "bot": bot, "error": "container_not_registered"}
@@ -478,13 +497,22 @@ async def execute_one(container_name, bot, command_name, args):
         "command": command_name,
         "args": args,
     }
+    payload.update(extra or {})
 
     lock = agent_locks.setdefault(container_name, asyncio.Lock())
 
     try:
         async with lock:
             await ws.send_text(json.dumps(payload))
-        result = await asyncio.wait_for(future, timeout=15)
+        wait_timeout = 15.0
+        if command_name in EXEC_COMMANDS:
+            try:
+                requested = float((extra or {}).get("timeout") or 0)
+            except (TypeError, ValueError):
+                requested = 0
+            wait_timeout = min(max(wait_timeout, requested + 15.0), 600.0)
+
+        result = await asyncio.wait_for(future, timeout=wait_timeout)
         return {
             "ok": bool(result.get("ok")),
             "container": container_name,
@@ -492,7 +520,8 @@ async def execute_one(container_name, bot, command_name, args):
             "result": result,
         }
     except asyncio.TimeoutError:
-        await request_agent_rotation(container_name, bot, "bot_timeout")
+        if command_name not in EXEC_COMMANDS:
+            await request_agent_rotation(container_name, bot, "bot_timeout")
         return {"ok": False, "container": container_name, "bot": bot, "error": "bot_timeout"}
     except Exception as exc:
         return {"ok": False, "container": container_name, "bot": bot, "error": str(exc)}
@@ -666,6 +695,14 @@ async def command(data: Command, authorization: str | None = Header(default=None
             "allowed": sorted(ALLOWED),
         })
 
+    if command_name in EXEC_COMMANDS and not data.args and not data.command_line:
+        raise HTTPException(status_code=400, detail={
+            "error": "empty_command",
+            "hint": "Envie args [ls, -la] ou command_line (ls -la).",
+        })
+
+    extra = command_options(data)
+
     targets = []
 
     if data.container == "all":
@@ -696,7 +733,7 @@ async def command(data: Command, authorization: str | None = Header(default=None
         raise HTTPException(status_code=400, detail="too_many_targets")
 
     results = await asyncio.gather(*[
-        execute_verified(container_name, bot, command_name, data.args)
+        execute_verified(container_name, bot, command_name, data.args, 1, extra)
         for container_name, bot in targets
     ])
 
@@ -913,6 +950,10 @@ button:disabled{cursor:not-allowed;opacity:.55}
   padding:11px 12px;border-radius:11px;outline:none
 }
 .quick{display:flex;flex-wrap:wrap;gap:7px;margin-top:11px}
+.chip-input{
+  width:112px;background:#09101a;border:1px solid var(--border2);color:var(--text);
+  padding:7px 10px;border-radius:999px;font-size:11px;outline:none
+}
 .chip{
   border:1px solid var(--border);background:#0b1420;color:var(--muted2);padding:7px 10px;border-radius:999px;font-size:11px
 }
@@ -1261,13 +1302,13 @@ button:disabled{cursor:not-allowed;opacity:.55}
     <div class="section-head">
       <div>
         <h2>Console remoto</h2>
-        <p>Execute comandos permitidos em um bot, um container inteiro ou em todos.</p>
+        <p>Execute comandos em um bot, um container inteiro ou em todos. Use <b>exec &lt;comando&gt;</b> para shell livre (ls, curl, cat, ps, ...).</p>
       </div>
     </div>
     <div class="console-grid">
       <select id="containerSel" aria-label="Container"></select>
       <select id="botSel" aria-label="Bot"></select>
-      <input id="command" autocomplete="off" spellcheck="false" placeholder="Ex.: status | logs 100 | echo oi">
+      <input id="command" autocomplete="off" spellcheck="false" placeholder="Ex.: status | logs 100 | exec ls -la | exec curl -s ifconfig.me">
       <button id="runBtn" class="btn primary run-btn" type="button">Executar</button>
     </div>
     <div class="quick" id="quickCommands">
@@ -1277,6 +1318,12 @@ button:disabled{cursor:not-allowed;opacity:.55}
       <button class="chip" data-cmd="logs 40" type="button">Logs</button>
       <button class="chip" id="auditAllIps" type="button">Auditar IPs</button>
       <button class="chip" data-cmd="internet" type="button">Internet</button>
+      <button class="chip" data-cmd="exec ls -la" type="button">ls -la</button>
+      <button class="chip" data-cmd="exec curl -s ifconfig.me" type="button">curl IP</button>
+      <button class="chip" data-cmd="exec whoami" type="button">whoami</button>
+      <button class="chip" data-cmd="exec df -h" type="button">df -h</button>
+      <button class="chip" data-cmd="exec ps aux" type="button">ps aux</button>
+      <input id="execTimeout" class="chip-input" type="number" min="1" max="600" placeholder="timeout (s)" title="Timeout dos comandos exec">
     </div>
   </section>
 
@@ -1344,6 +1391,7 @@ const containerSel = document.getElementById('containerSel');
 const botSel = document.getElementById('botSel');
 const commandInput = document.getElementById('command');
 const runBtn = document.getElementById('runBtn');
+const execTimeout = document.getElementById('execTimeout');
 const out = document.getElementById('out');
 const outputStatus = document.getElementById('outputStatus');
 const copyTerminalBtn=document.getElementById('copyTerminalBtn');
@@ -2063,6 +2111,28 @@ if(auditAllIps){
   auditAllIps.addEventListener('click',()=>auditIPs('all'));
 }
 
+function prettyItem(item){
+  const res=(item && item.result) || {};
+  if(res.stdout===undefined && res.stderr===undefined) return JSON.stringify(item,null,2);
+  const head=item.container+'/'+item.bot+(res.exit_code!==undefined?' • exit '+res.exit_code:'');
+  let body=res.stdout||'';
+  if(res.stderr) body+=(body?'
+':'')+'[stderr]
+'+res.stderr;
+  if(res.truncated) body+='
+[saída truncada no bot]';
+  return head+'
+'+(String(body).trim()||'(sem saída)');
+}
+
+function prettyResults(results){
+  return (results||[]).map(prettyItem).join('
+
+────────────────────
+
+');
+}
+
 async function runTyped(){
   const raw=commandInput.value.trim();
   if(!raw){
@@ -2071,14 +2141,20 @@ async function runTyped(){
   }
   const parts=raw.split(/\s+/);
   const cmd=parts.shift().toLowerCase();
-  const allowed=['ping','status','uptime','hostname','disk','memory','echo','logs','internet','public_ip'];
+  const allowed=['ping','status','uptime','hostname','disk','memory','echo','logs','internet','public_ip','exec','shell'];
   if(!allowed.includes(cmd)){
     setOutput('Comando não permitido.\n\nPermitidos: '+allowed.join(', '),'bloqueado');
     return;
   }
   let args=parts;
   if(cmd==='logs' && args.length===0) args=['60'];
-  await run(containerSel.value,botSel.value,cmd,args);
+  const opts={};
+  if(cmd==='exec' || cmd==='shell'){
+    opts.command_line=raw.slice(raw.indexOf(cmd)+cmd.length).trim();
+    const t=Number(execTimeout && execTimeout.value);
+    if(t>0) opts.timeout=t;
+  }
+  await run(containerSel.value,botSel.value,cmd,args,opts);
 }
 
 runBtn.addEventListener('click',runTyped);
@@ -2086,8 +2162,9 @@ commandInput.addEventListener('keydown',(e)=>{
   if(e.key==='Enter') runTyped();
 });
 
-async function run(container,bot,command,argsOverride=null){
+async function run(container,bot,command,argsOverride=null,opts=null){
   const args=argsOverride ?? (command==='logs'?[60]:[]);
+  const bodyOpts=opts||{};
   runBtn.disabled=true;
   setOutput('> '+command+'\nAlvo: '+container+'/'+bot+'\n\nExecutando...','executando');
 
@@ -2095,7 +2172,7 @@ async function run(container,bot,command,argsOverride=null){
     const r=await fetch('/api/command',{
       method:'POST',
       headers:headers(),
-      body:JSON.stringify({container,bot,command,args})
+      body:JSON.stringify(Object.assign({container,bot,command,args},bodyOpts))
     });
     const j=await r.json();
 
@@ -2105,7 +2182,7 @@ async function run(container,bot,command,argsOverride=null){
 
     if(j.targets!==undefined){
       const summary='Lote concluído • '+j.succeeded+'/'+j.targets+' sucesso(s) • '+j.failed+' falha(s)';
-      setOutput(summary+'\n\n'+JSON.stringify(j.results,null,2),j.failed?'parcial':'concluído');
+      setOutput(summary+'\n\n'+prettyResults(j.results),j.failed?'parcial':'concluído');
     }else{
       setOutput(JSON.stringify(j,null,2),'concluído');
     }
