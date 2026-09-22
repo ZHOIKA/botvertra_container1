@@ -20,6 +20,7 @@ agents = {}
 pending = {}
 agent_locks = {}
 bot_ip_cache = {}
+dashboard_clients = set()
 tor_test_state = {
     "container": "container1",
     "bot": "bot-01",
@@ -124,6 +125,7 @@ async def run_public_ip_selftest():
     ])
 
     remember_public_ip_results(results)
+    await broadcast_dashboard()
 
     ip_to_targets = {}
     failures = []
@@ -176,6 +178,7 @@ async def run_single_tor_test():
             status_result.get("error") or ip_result.get("error") or "test_failed"
         ),
     }
+    await broadcast_dashboard()
     print(
         f"[tor-test] {container_name}/{bot} • "
         f"tor={'ON' if tor_test_state['tor_configured'] else 'OFF'} • "
@@ -224,6 +227,7 @@ async def start_selftest():
     asyncio.create_task(delayed_public_ip_test())
     asyncio.create_task(delayed_tor_test())
     asyncio.create_task(periodic_ip_cache_refresh())
+    asyncio.create_task(dashboard_heartbeat())
 ALLOWED = {
     "ping", "status", "uptime", "hostname",
     "disk", "memory", "echo", "logs", "internet", "public_ip"
@@ -278,6 +282,87 @@ def snapshot():
             ],
         })
     return result
+
+def dashboard_snapshot_payload():
+    data = snapshot()
+    return {
+        "type": "dashboard_snapshot",
+        "containers": data,
+        "total_containers": len(data),
+        "total_bots": sum(len(x["bots"]) for x in data),
+        "online_containers": sum(1 for x in data if x["online"]),
+        "online_bots": sum(
+            1 for container in data for bot in container["bots"] if bot["online"]
+        ),
+        "updated_at": time.time(),
+    }
+
+async def broadcast_dashboard():
+    if not dashboard_clients:
+        return
+
+    payload = json.dumps(dashboard_snapshot_payload())
+    stale = []
+
+    for ws in list(dashboard_clients):
+        try:
+            await ws.send_text(payload)
+        except Exception:
+            stale.append(ws)
+
+    for ws in stale:
+        dashboard_clients.discard(ws)
+
+async def dashboard_heartbeat():
+    await asyncio.sleep(20)
+    while True:
+        try:
+            await broadcast_dashboard()
+        except Exception as exc:
+            print(f"[dashboard-ws] heartbeat falhou: {exc}", flush=True)
+        await asyncio.sleep(30)
+
+@app.websocket("/ws/dashboard")
+async def dashboard_socket(websocket: WebSocket):
+    await websocket.accept()
+
+    try:
+        raw = await asyncio.wait_for(websocket.receive_text(), timeout=10)
+        auth = json.loads(raw)
+
+        if auth.get("type") != "auth":
+            await websocket.close(code=4401)
+            return
+
+        received = str(auth.get("token", ""))
+        if not secrets.compare_digest(received, TOKEN):
+            await websocket.send_text(json.dumps({
+                "type": "auth_error",
+                "error": "unauthorized",
+            }))
+            await websocket.close(code=4401)
+            return
+
+        dashboard_clients.add(websocket)
+        await websocket.send_text(json.dumps(dashboard_snapshot_payload()))
+        print(f"[dashboard-ws] cliente conectado • {len(dashboard_clients)} ativo(s)", flush=True)
+
+        while True:
+            raw = await websocket.receive_text()
+            msg = json.loads(raw)
+            if msg.get("type") == "ping":
+                await websocket.send_text(json.dumps({
+                    "type": "pong",
+                    "ts": time.time(),
+                }))
+
+    except (WebSocketDisconnect, asyncio.TimeoutError):
+        pass
+    except Exception as exc:
+        print(f"[dashboard-ws] erro: {exc}", flush=True)
+    finally:
+        dashboard_clients.discard(websocket)
+        print(f"[dashboard-ws] cliente desconectado • {len(dashboard_clients)} ativo(s)", flush=True)
 
 @app.get("/health")
 async def health():
@@ -479,6 +564,7 @@ async def command(data: Command, authorization: str | None = Header(default=None
 
     if command_name == "public_ip":
         remember_public_ip_results(results)
+        await broadcast_dashboard()
 
     succeeded = sum(1 for item in results if item.get("ok"))
     failed = len(results) - succeeded
@@ -538,6 +624,7 @@ async def agent(websocket: WebSocket):
 
         await websocket.send_text(json.dumps({"ok": True, "container": name}))
         print(f"[agent] {name} conectado com {len(bots)} bots", flush=True)
+        await broadcast_dashboard()
         if name == "container1":
             asyncio.create_task(delayed_tor_reconnect_test())
 
@@ -565,6 +652,7 @@ async def agent(websocket: WebSocket):
                 current["ws"] = None
                 current["last_seen"] = time.time()
                 print(f"[agent] {name} desconectado", flush=True)
+                await broadcast_dashboard()
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
@@ -797,7 +885,7 @@ button:disabled{cursor:not-allowed;opacity:.55}
     <div class="stat"><div class="label">Containers</div><div id="statContainers" class="value">—</div><div id="statContainersSub" class="sub">sem dados</div></div>
     <div class="stat"><div class="label">Bots</div><div id="statBots" class="value">—</div><div id="statBotsSub" class="sub">sem dados</div></div>
     <div class="stat"><div class="label">Online</div><div id="statOnline" class="value">—</div><div class="sub">workers disponíveis</div></div>
-    <div class="stat"><div class="label">Atualização</div><div id="statRefresh" class="value" style="font-size:16px;margin-top:9px">—</div><div class="sub">auto a cada 5s</div></div>
+    <div class="stat"><div class="label">Atualização</div><div id="statRefresh" class="value" style="font-size:16px;margin-top:9px">—</div><div class="sub">tempo real</div></div>
   </section>
 
   <section class="panel auth">
@@ -889,6 +977,8 @@ const statRefresh = document.getElementById('statRefresh');
 
 let data = [];
 let loading = false;
+let liveSocket = null;
+let liveRetry = null;
 
 function readSavedToken(){
   try{return localStorage.getItem('botvertra_token') || ''}catch(e){return ''}
@@ -919,6 +1009,72 @@ function nowLabel(){
   return new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
 }
 
+function applyLiveSnapshot(j){
+  data=j.containers||[];
+  renderStats();
+  rebuildSelectors();
+  renderContainers();
+  authState.textContent='Tempo real ativo • '+(j.total_bots ?? data.reduce((n,c)=>n+c.bots.length,0))+' bots';
+}
+
+function disconnectLive(){
+  if(liveRetry){
+    clearTimeout(liveRetry);
+    liveRetry=null;
+  }
+  if(liveSocket){
+    try{liveSocket.onclose=null;liveSocket.close()}catch(e){}
+    liveSocket=null;
+  }
+}
+
+function scheduleLiveReconnect(){
+  if(liveRetry || !token.value.trim()) return;
+  liveRetry=setTimeout(()=>{
+    liveRetry=null;
+    connectLive();
+  },2000);
+}
+
+function connectLive(){
+  const value=token.value.trim();
+  if(!value) return;
+
+  disconnectLive();
+
+  const proto=location.protocol==='https:'?'wss':'ws';
+  const ws=new WebSocket(proto+'://'+location.host+'/ws/dashboard');
+  liveSocket=ws;
+
+  ws.addEventListener('open',()=>{
+    ws.send(JSON.stringify({type:'auth',token:value}));
+  });
+
+  ws.addEventListener('message',(event)=>{
+    try{
+      const j=JSON.parse(event.data);
+      if(j.type==='dashboard_snapshot'){
+        applyLiveSnapshot(j);
+      }else if(j.type==='auth_error'){
+        authState.textContent='Token inválido no tempo real';
+        setGlobal(false,'Falha na autenticação');
+      }
+    }catch(e){}
+  });
+
+  ws.addEventListener('close',()=>{
+    if(liveSocket===ws) liveSocket=null;
+    if(token.value.trim()){
+      authState.textContent='Tempo real reconectando...';
+      scheduleLiveReconnect();
+    }
+  });
+
+  ws.addEventListener('error',()=>{
+    try{ws.close()}catch(e){}
+  });
+}
+
 token.value = readSavedToken();
 
 toggleToken.addEventListener('click',()=>{
@@ -936,11 +1092,13 @@ saveBtn.addEventListener('click',()=>{
   const saved=writeSavedToken(value);
   authState.textContent=saved?'Token salvo neste navegador ✓':'Token em uso; navegador bloqueou o armazenamento';
   loadBots();
+  connectLive();
 });
 
 refreshBtn.addEventListener('click',()=>loadBots(true));
 
 clearBtn.addEventListener('click',()=>{
+  disconnectLive();
   token.value='';
   removeSavedToken();
   data=[];
@@ -1303,12 +1461,18 @@ async function run(container,bot,command,argsOverride=null){
 }
 
 setInterval(()=>{
-  if(token.value.trim()) loadBots();
-},5000);
+  if(
+    token.value.trim() &&
+    (!liveSocket || liveSocket.readyState!==WebSocket.OPEN)
+  ){
+    loadBots();
+  }
+},30000);
 
 if(token.value.trim()){
   authState.textContent='Token carregado do navegador';
   loadBots();
+  connectLive();
 }
 </script>
 </body>
