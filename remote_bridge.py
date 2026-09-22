@@ -105,6 +105,9 @@ def handle_rotate(msg):
 
 
 async def connect_once():
+    send_lock = asyncio.Lock()
+    tasks = set()
+
     async with websockets.connect(
         CONTROLLER_URL,
         ping_interval=20,
@@ -112,43 +115,57 @@ async def connect_once():
         close_timeout=5,
         max_size=2_000_000,
     ) as ws:
-        await ws.send(json.dumps({
+        async def send_json(payload):
+            async with send_lock:
+                await ws.send(json.dumps(payload))
+
+        async def process_command(msg):
+            result, request_id, bot = await handle_command(msg)
+            await send_json({
+                "type": "result",
+                "id": request_id,
+                "bot": bot,
+                "result": result,
+            })
+
+        await send_json({
             "type": "auth",
             "token": CONTROLLER_TOKEN,
             "container": CONTAINER_NAME,
             "bots": BOTS,
-        }))
+        })
 
         auth = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
         if not auth.get("ok"):
             raise RuntimeError("controller recusou autenticacao")
 
-        print(f"[bridge] {CONTAINER_NAME} conectado • {len(BOTS)} bots registrados", flush=True)
+        print(f"[bridge] {CONTAINER_NAME} conectado • {len(BOTS)} bots registrados • concorrente", flush=True)
 
-        async for raw in ws:
-            msg = json.loads(raw)
-            msg_type = msg.get("type")
+        try:
+            async for raw in ws:
+                msg = json.loads(raw)
+                msg_type = msg.get("type")
 
-            if msg_type == "rotate":
-                applied = handle_rotate(msg)
-                await ws.send(json.dumps({
-                    "type": "rotate_ack",
-                    "bot": msg.get("bot"),
-                    "applied": applied,
-                }))
-                continue
+                if msg_type == "rotate":
+                    applied = handle_rotate(msg)
+                    await send_json({
+                        "type": "rotate_ack",
+                        "bot": msg.get("bot"),
+                        "applied": applied,
+                    })
+                    continue
 
-            if msg_type != "command":
-                continue
+                if msg_type != "command":
+                    continue
 
-            result, request_id, bot = await handle_command(msg)
-
-            await ws.send(json.dumps({
-                "type": "result",
-                "id": request_id,
-                "bot": bot,
-                "result": result,
-            }))
+                task = asyncio.create_task(process_command(msg))
+                tasks.add(task)
+                task.add_done_callback(tasks.discard)
+        finally:
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def main():
