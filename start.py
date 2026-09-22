@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
-"""Manager do container 1 - 20 bots, cada um com IP publico proprio.
+"""Manager do container - 20 bots com IP proprio e rotacao automatica.
 
-Roteamento por bot (ordem de prioridade):
-  1. BOT_PROXY_<NN>  -> proxy dedicado (garante IP unico e estavel)
-  2. Tor compartilhado -> circuito isolado por bot (IsolateSOCKSAuth)
-  3. direto          -> IP da propria VPS (so quando nao ha 1 nem 2)
+Roteamento por bot:
+  1. BOT_PROXY_<NN> (+ _ALTk) -> proxy dedicado (pool rotativo)
+  2. Tor compartilhado        -> circuito isolado por bot (IsolateSOCKSAuth)
+  3. direto                   -> IP da VPS
+
+Rotacao automatica (ip_rotator):
+  * bots em local_timeout / bot_timeout -> reconecta por rota diferente
+  * bots com IP publico duplicado       -> reconecta por rota diferente
 """
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
+import ip_rotator
+from ip_rotator import all_bots
 from tor_manager import start_shared_tor
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -26,63 +33,82 @@ for directory in (LOG_DIR, PID_DIR, STATE_DIR, CMD_DIR):
 CONTAINER_NAME = os.getenv("CONTAINER_NAME", "container1").strip()
 BOT_COUNT = int(os.getenv("BOT_COUNT", "20"))
 TOR_SOCKS_PORT = int(os.getenv("TOR_SOCKS_PORT", "19050"))
+IP_AUDIT_INTERVAL = int(os.getenv("IP_AUDIT_INTERVAL", "90"))
 
-processes = []
-print(f"[manager] build={CONTAINER_NAME}-tor-isolation-v1", flush=True)
+os.environ["CONTAINER_NAME"] = CONTAINER_NAME
+os.environ["BOT_COUNT"] = str(BOT_COUNT)
+
+print(f"[manager] build={CONTAINER_NAME}-auto-rotate-v1", flush=True)
 
 # --- Tor compartilhado (um por container, isolamento por bot) --------------- #
 tor = start_shared_tor(BASE_DIR, STATE_DIR, LOG_DIR, TOR_SOCKS_PORT, CONTAINER_NAME)
-tor_socks_url = tor["socks_url"]
 tor_process = tor["process"]
-if tor_socks_url:
-    print(f"[tor] SOCKS pronto: {tor_socks_url}", flush=True)
+if tor["socks_url"]:
+    os.environ["TOR_SOCKS_URL"] = tor["socks_url"]
+    print(f"[tor] SOCKS pronto: {tor['socks_url']}", flush=True)
 else:
     print("[tor] sem SOCKS; bots sem proxy dedicado usarao o IP da VPS", flush=True)
 
-
-def spawn_bots():
-    procs = []
-    for i in range(1, BOT_COUNT + 1):
-        bot_id = f"bot-{i:02d}"
-        env = os.environ.copy()
-        env["BOT_ID"] = bot_id
-
-        # Nunca herdar proxy/isolation do ambiente do manager.
-        for key in ("BOT_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "http_proxy",
-                    "https_proxy", "TOR_SOCKS_URL", "TOR_ISOLATION_ID"):
-            env.pop(key, None)
-
-        bot_proxy = os.getenv(f"BOT_PROXY_{i:02d}", "").strip()
-
-        if bot_proxy:
-            env["BOT_PROXY"] = bot_proxy
-            env["HTTP_PROXY"] = bot_proxy
-            env["HTTPS_PROXY"] = bot_proxy
-            env["http_proxy"] = bot_proxy
-            env["https_proxy"] = bot_proxy
-            route = "proxy"
-        elif tor_socks_url:
-            env["TOR_SOCKS_URL"] = tor_socks_url
-            env["TOR_ISOLATION_ID"] = f"{CONTAINER_NAME}-{bot_id}"
-            route = "tor"
-        else:
-            route = "direct"
-
-        log_file = open(LOG_DIR / f"{bot_id}.stdout.log", "ab", buffering=0)
-        proc = subprocess.Popen(
-            [sys.executable, str(BASE_DIR / "bot.py")],
-            cwd=str(BASE_DIR),
-            env=env,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-        )
-        (PID_DIR / f"{bot_id}.pid").write_text(str(proc.pid), encoding="utf-8")
-        procs.append((bot_id, proc, log_file))
-        print(f"[{bot_id}] iniciado pid={proc.pid} route={route}", flush=True)
-    return procs
+bots = {}
 
 
-processes = spawn_bots()
+def _clean_env(bot_env):
+    for key in ("BOT_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "http_proxy",
+                "https_proxy", "TOR_SOCKS_URL", "TOR_ISOLATION_ID"):
+        bot_env.pop(key, None)
+    return bot_env
+
+
+def launch(bot, gen):
+    env = _clean_env(os.environ.copy())
+    env["BOT_ID"] = bot
+    route = ip_rotator.resolve_route(bot, gen)
+    env.update(route["env"])
+
+    log_file = open(LOG_DIR / f"{bot}.stdout.log", "ab", buffering=0)
+    proc = subprocess.Popen(
+        [sys.executable, str(BASE_DIR / "bot.py")],
+        cwd=str(BASE_DIR),
+        env=env,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+    )
+    (PID_DIR / f"{bot}.pid").write_text(str(proc.pid), encoding="utf-8")
+    return {"proc": proc, "log": log_file, "gen": gen,
+            "mode": route["mode"], "target": route["target"]}
+
+
+def stop(bot):
+    rec = bots.pop(bot, None)
+    if not rec:
+        return
+    proc = rec["proc"]
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    try:
+        rec["log"].close()
+    except OSError:
+        pass
+
+
+def relaunch(bot, reason=None):
+    gen = bots[bot]["gen"] if bot in bots else ip_rotator.generation(bot)
+    if reason:
+        gen = ip_rotator.bump_generation(bot, reason)
+    stop(bot)
+    rec = launch(bot, gen)
+    bots[bot] = rec
+    label = reason or "recovery"
+    print(f"[{bot}] iniciado pid={rec['proc'].pid} gen={gen} "
+          f"route={rec['mode']}:{rec['target']} motivo={label}", flush=True)
+
+
+for _bot in all_bots():
+    relaunch(_bot, None)
 
 bridge = subprocess.Popen(
     [sys.executable, str(BASE_DIR / "remote_bridge.py")],
@@ -90,13 +116,28 @@ bridge = subprocess.Popen(
     env=os.environ.copy(),
 )
 
-print(f"[manager] {len(processes)} bots iniciados", flush=True)
+print(f"[manager] {len(bots)} bots iniciados", flush=True)
 print(f"[manager] bridge externo iniciado pid={bridge.pid}", flush=True)
+
+# --- auditoria de IP (duplicados) + rotacao por timeout --------------------- #
+if IP_AUDIT_INTERVAL > 0:
+    threading.Thread(
+        target=ip_rotator.audit_loop, args=(IP_AUDIT_INTERVAL,), daemon=True
+    ).start()
+    print(f"[manager] auditoria de IP ativa (intervalo={IP_AUDIT_INTERVAL}s)", flush=True)
+else:
+    print("[manager] auditoria de IP desativada (IP_AUDIT_INTERVAL=0)", flush=True)
 
 try:
     while True:
-        alive = sum(1 for _, proc, _ in processes if proc.poll() is None)
-        if alive == 0:
+        for bot in list(bots):
+            reason = ip_rotator.consume_rotation(bot)
+            if reason:
+                relaunch(bot, reason)
+            elif bots[bot]["proc"].poll() is not None:
+                relaunch(bot, None)
+
+        if not any(rec["proc"].poll() is None for rec in bots.values()):
             raise SystemExit("Todos os bots foram encerrados")
 
         if bridge.poll() is not None:
@@ -107,7 +148,7 @@ try:
                 env=os.environ.copy(),
             )
 
-        time.sleep(5)
+        time.sleep(2)
 
 except KeyboardInterrupt:
     print("[manager] encerrando...", flush=True)
@@ -119,15 +160,7 @@ finally:
     if tor_process is not None and tor_process.poll() is None:
         tor_process.terminate()
 
-    for _, proc, log_file in processes:
-        if proc.poll() is None:
-            proc.terminate()
-        log_file.close()
-
-    for _, proc, _ in processes:
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+    for bot in list(bots):
+        stop(bot)
 
     print("[manager] finalizado", flush=True)

@@ -422,11 +422,28 @@ async def execute_one(container_name, bot, command_name, args):
             "result": result,
         }
     except asyncio.TimeoutError:
+        await request_agent_rotation(container_name, bot, "bot_timeout")
         return {"ok": False, "container": container_name, "bot": bot, "error": "bot_timeout"}
     except Exception as exc:
         return {"ok": False, "container": container_name, "bot": bot, "error": str(exc)}
     finally:
         pending.pop(request_id, None)
+
+async def request_agent_rotation(container_name, bot, reason="bot_timeout"):
+    """Pede ao agente que reconecte o bot por uma rota de IP diferente."""
+    agent = agents.get(container_name)
+    if not agent:
+        return False
+    ws = agent.get("ws")
+    if ws is None:
+        return False
+    try:
+        await ws.send_text(json.dumps({"type": "rotate", "bot": bot, "reason": reason}))
+        print(f"[rotate] {container_name}/{bot} solicitado ({reason})", flush=True)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print(f"[rotate] falha ao solicitar {container_name}/{bot}: {exc}", flush=True)
+        return False
 
 async def collect_ip_audit(container_filter="all"):
     targets = []
