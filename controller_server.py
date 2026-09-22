@@ -886,6 +886,132 @@ button:disabled{cursor:not-allowed;opacity:.55}
   .bots-grid{grid-template-columns:1fr}
   .container-top{align-items:flex-start}
 }
+/* dashboard-clean-v2 */
+.shell{max-width:1500px;padding:18px}
+.header{position:sticky;top:0;z-index:20;padding:12px 0 14px;background:linear-gradient(180deg,rgba(7,11,18,.96),rgba(7,11,18,.82),transparent);backdrop-filter:blur(14px)}
+.stats{gap:10px;margin:12px 0}
+.stat{padding:12px 14px;border-radius:14px}
+.stat .value{font-size:22px}
+.panel{border-radius:16px}
+.auth{padding:10px 12px;gap:8px;margin-bottom:12px}
+.commandbar{padding:12px;margin-bottom:14px}
+.commandbar .section-head{margin-bottom:10px}
+.commandbar .section-head p{display:none}
+.commandbar .quick{margin-top:9px}
+.commandbar .quick .chip:nth-child(n+6):not(#auditAllIps){display:none}
+.content-grid{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) 390px;
+  gap:16px;
+  align-items:start;
+}
+.content-grid>section{min-width:0}
+.output{
+  position:sticky;
+  top:82px;
+  max-height:calc(100vh - 100px);
+  overflow:hidden;
+  display:flex;
+  flex-direction:column;
+  min-height:520px;
+}
+.output-head{flex:0 0 auto}
+.terminal{
+  flex:1 1 auto;
+  min-height:420px;
+  max-height:none;
+  overflow:auto;
+  border-radius:12px;
+  padding:14px;
+  font-size:12px;
+  line-height:1.55;
+}
+.containers{display:grid;gap:12px}
+.container-card{padding:14px}
+.container-top{margin-bottom:10px}
+.container-icon{width:36px;height:36px;border-radius:11px}
+.container-meta{font-size:11px}
+.bulk-actions{gap:6px;margin:9px 0 12px}
+.bulk-actions .btn{padding:7px 10px;font-size:11px}
+.bulk-more{position:relative}
+.bulk-more>summary,.bot-more>summary{
+  list-style:none;cursor:pointer;user-select:none;
+}
+.bulk-more>summary::-webkit-details-marker,.bot-more>summary::-webkit-details-marker{display:none}
+.more-menu{
+  display:flex;flex-wrap:wrap;gap:6px;margin-top:7px;
+  padding:8px;border:1px solid var(--border);border-radius:11px;
+  background:rgba(5,9,15,.72)
+}
+.bots-grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(210px,1fr));
+  gap:8px
+}
+.bot{
+  padding:10px;
+  border-radius:12px;
+  min-height:0;
+  transition:border-color .16s ease,background .16s ease,transform .16s ease;
+}
+.bot:hover{transform:translateY(-1px)}
+.bot-head{margin-bottom:6px}
+.bot-name{font-size:12px}
+.bot-ip{margin-top:5px;padding:5px 7px;font-size:10px}
+.bot-actions{display:flex;gap:5px;margin-top:8px;align-items:center}
+.bot-actions button{padding:5px 8px;font-size:10px}
+.bot-more{margin-left:auto;position:relative}
+.bot-more .more-menu{
+  position:absolute;right:0;top:100%;z-index:12;
+  width:210px;box-shadow:0 16px 38px rgba(0,0,0,.34)
+}
+.bot-more:not([open]) .more-menu{display:none}
+.tor-note{font-size:9px;padding:5px 7px;margin-top:6px}
+.section-head{margin-bottom:9px}
+.section-head h2{font-size:15px}
+.section-head p{font-size:11px}
+.terminal-fab{display:none}
+
+@media (max-width:1050px){
+  .content-grid{grid-template-columns:minmax(0,1fr) 340px}
+  .bots-grid{grid-template-columns:repeat(auto-fill,minmax(190px,1fr))}
+}
+@media (max-width:820px){
+  .shell{padding:12px}
+  .header{top:0;padding-top:8px}
+  .stats{grid-template-columns:repeat(2,1fr)}
+  .auth{flex-wrap:wrap}
+  .commandbar .console-grid{grid-template-columns:1fr 1fr}
+  .commandbar .console-grid input{grid-column:1/-1}
+  .commandbar .console-grid .run-btn{grid-column:1/-1}
+  .content-grid{display:block}
+  .output{
+    position:fixed;
+    z-index:50;
+    left:10px;right:10px;bottom:10px;top:auto;
+    max-height:72vh;min-height:0;
+    transform:translateY(calc(100% + 24px));
+    transition:transform .2s ease;
+    box-shadow:0 24px 70px rgba(0,0,0,.55);
+  }
+  .output.mobile-open{transform:translateY(0)}
+  .terminal{min-height:280px;max-height:52vh}
+  .terminal-fab{
+    display:inline-flex;align-items:center;justify-content:center;
+    position:fixed;right:16px;bottom:16px;z-index:55;
+    border:1px solid var(--border2);background:var(--panel2);color:var(--text);
+    border-radius:999px;padding:10px 14px;box-shadow:0 12px 30px rgba(0,0,0,.38);
+    font-weight:700;font-size:12px
+  }
+  .containers{padding-bottom:74px}
+}
+@media (max-width:520px){
+  .bots-grid{grid-template-columns:1fr}
+  .brand p{display:none}
+  .live-pill{font-size:10px}
+  .commandbar .quick{display:grid;grid-template-columns:1fr 1fr}
+  .commandbar .quick .chip{width:100%}
+}
 </style>
 </head>
 <body>
@@ -924,7 +1050,7 @@ button:disabled{cursor:not-allowed;opacity:.55}
     <span id="authState" class="auth-state">Insira o token para conectar</span>
   </section>
 
-  <section class="panel console">
+  <section class="panel console commandbar">
     <div class="section-head">
       <div>
         <h2>Console remoto</h2>
@@ -938,16 +1064,12 @@ button:disabled{cursor:not-allowed;opacity:.55}
       <button id="runBtn" class="btn primary run-btn" type="button">Executar</button>
     </div>
     <div class="quick" id="quickCommands">
-      <button class="chip" data-cmd="ping" type="button">ping</button>
-      <button class="chip" data-cmd="status" type="button">status</button>
-      <button class="chip" data-cmd="uptime" type="button">uptime</button>
-      <button class="chip" data-cmd="memory" type="button">memory</button>
-      <button class="chip" data-cmd="disk" type="button">disk</button>
-      <button class="chip" data-cmd="hostname" type="button">hostname</button>
-      <button class="chip" data-cmd="logs 40" type="button">logs 40</button>
-      <button class="chip" data-cmd="internet" type="button">internet Google</button>
+      <button class="chip" data-cmd="ping" type="button">Ping</button>
+      <button class="chip" data-cmd="status" type="button">Status</button>
       <button class="chip" data-cmd="public_ip" type="button">IP público</button>
-      <button class="chip" id="auditAllIps" type="button">IPs duplicados • todos</button>
+      <button class="chip" data-cmd="logs 40" type="button">Logs</button>
+      <button class="chip" id="auditAllIps" type="button">Auditar IPs</button>
+      <button class="chip" data-cmd="internet" type="button">Internet</button>
     </div>
   </section>
 
@@ -966,12 +1088,13 @@ button:disabled{cursor:not-allowed;opacity:.55}
 
     <aside class="panel output">
       <div class="output-head">
-        <h2>Saída do comando</h2>
+        <h2>Terminal</h2>
         <span id="outputStatus" class="output-status">pronto</span>
       </div>
       <pre id="out" class="terminal">BotVertra pronto.</pre>
     </aside>
   </main>
+  <button id="terminalFab" class="terminal-fab" type="button">⌘ Terminal</button>
 
   <div class="footer">BotVertra Controller • acesso autenticado • comandos allowlist</div>
 </div>
@@ -999,11 +1122,20 @@ const statBots = document.getElementById('statBots');
 const statBotsSub = document.getElementById('statBotsSub');
 const statOnline = document.getElementById('statOnline');
 const statRefresh = document.getElementById('statRefresh');
+const terminalFab=document.getElementById('terminalFab');
+const terminalPanel=document.querySelector('.output');
 
 let data = [];
 let loading = false;
 let liveSocket = null;
 let liveRetry = null;
+
+if(terminalFab && terminalPanel){
+  terminalFab.addEventListener('click',()=>{
+    terminalPanel.classList.toggle('mobile-open');
+    terminalFab.textContent=terminalPanel.classList.contains('mobile-open')?'✕ Fechar':'⌘ Terminal';
+  });
+}
 
 function readSavedToken(){
   try{return localStorage.getItem('botvertra_token') || ''}catch(e){return ''}
@@ -1021,9 +1153,17 @@ function setGlobal(ok,text){
   globalDot.className='dot '+(ok?'online':'offline');
   globalText.textContent=text;
 }
+function revealTerminal(){
+  if(window.matchMedia('(max-width:820px)').matches && terminalPanel){
+    terminalPanel.classList.add('mobile-open');
+    if(terminalFab) terminalFab.textContent='✕ Fechar';
+  }
+}
 function setOutput(text,status='pronto'){
+
   out.textContent=text;
   outputStatus.textContent=status;
+  if(status!=='pronto') revealTerminal();
   out.scrollTop=0;
 }
 function fmtTime(ts){
@@ -1177,6 +1317,12 @@ function rebuildSelectors(){
 }
 containerSel.addEventListener('change',rebuildSelectors);
 
+document.addEventListener('click',(e)=>{
+  for(const el of document.querySelectorAll('.bot-more[open],.bulk-more[open]')){
+    if(!el.contains(e.target)) el.open=false;
+  }
+});
+
 function renderStats(){
   const totalContainers=data.length;
   const onlineContainers=data.filter(c=>c.online).length;
@@ -1246,10 +1392,22 @@ function renderContainers(){
 
     const bulk=document.createElement('div');
     bulk.className='bulk-actions';
-    for(const cmd of ['ping','status','uptime','memory','disk','internet','public_ip']){
-      bulk.appendChild(actionButton(cmd+' em todos',()=>run(c.name,'all',cmd)));
+    bulk.appendChild(actionButton('Ping',()=>run(c.name,'all','ping')));
+    bulk.appendChild(actionButton('Status',()=>run(c.name,'all','status')));
+    bulk.appendChild(actionButton('Auditar IPs',()=>auditIPs(c.name)));
+
+    const bulkMore=document.createElement('details');
+    bulkMore.className='bulk-more';
+    const bulkSummary=document.createElement('summary');
+    bulkSummary.className='btn ghost';
+    bulkSummary.textContent='Mais ▾';
+    const bulkMenu=document.createElement('div');
+    bulkMenu.className='more-menu';
+    for(const cmd of ['uptime','memory','disk','internet','public_ip']){
+      bulkMenu.appendChild(actionButton(cmd,()=>run(c.name,'all',cmd)));
     }
-    bulk.appendChild(actionButton('IPs duplicados',()=>auditIPs(c.name)));
+    bulkMore.append(bulkSummary,bulkMenu);
+    bulk.appendChild(bulkMore);
 
     const grid=document.createElement('div');
     grid.className='bots-grid';
@@ -1291,13 +1449,37 @@ function renderContainers(){
 
       const actions=document.createElement('div');
       actions.className='bot-actions';
-      for(const cmd of ['ping','status','memory','disk','uptime','internet','public_ip','logs']){
+
+      for(const cmd of ['ping','status','logs']){
         const bt=document.createElement('button');
         bt.type='button';
         bt.textContent=cmd;
         bt.addEventListener('click',()=>run(c.name,b.bot,cmd));
         actions.appendChild(bt);
       }
+
+      const more=document.createElement('details');
+      more.className='bot-more';
+      const summary=document.createElement('summary');
+      summary.textContent='•••';
+      summary.className='btn ghost';
+      const menu=document.createElement('div');
+      menu.className='more-menu';
+
+      for(const cmd of ['memory','disk','uptime','internet','public_ip']){
+        const bt=document.createElement('button');
+        bt.type='button';
+        bt.className='btn';
+        bt.textContent=cmd;
+        bt.addEventListener('click',()=>{
+          more.open=false;
+          run(c.name,b.bot,cmd);
+        });
+        menu.appendChild(bt);
+      }
+
+      more.append(summary,menu);
+      actions.appendChild(more);
 
       if(b.tor_test){
         const note=document.createElement('div');
