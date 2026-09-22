@@ -245,6 +245,12 @@ class IPAuditRequest(BaseModel):
 
 def snapshot():
     result = []
+
+    ip_counts = {}
+    for (container_name, bot_name), item in bot_ip_cache.items():
+        ip = item.get("public_ip")
+        if ip:
+            ip_counts[ip] = ip_counts.get(ip, 0) + 1
     for name in sorted(agents):
         item = agents[name]
         connected = item.get("ws") is not None
@@ -258,6 +264,13 @@ def snapshot():
                     "online": connected,
                     "public_ip": bot_ip_cache.get((name, bot), {}).get("public_ip"),
                     "public_ip_checked_at": bot_ip_cache.get((name, bot), {}).get("checked_at", 0),
+                    "ip_duplicate": bool(
+                        bot_ip_cache.get((name, bot), {}).get("public_ip")
+                        and ip_counts.get(bot_ip_cache.get((name, bot), {}).get("public_ip"), 0) > 1
+                    ),
+                    "ip_shared_count": ip_counts.get(
+                        bot_ip_cache.get((name, bot), {}).get("public_ip"), 0
+                    ),
                     "tor_test": name == "container1" and bot == "bot-01",
                     "tor_test_state": tor_test_state if name == "container1" and bot == "bot-01" else None,
                 }
@@ -699,7 +712,15 @@ button:disabled{cursor:not-allowed;opacity:.55}
 }
 .bot-head{display:flex;justify-content:space-between;gap:8px;align-items:center}
 .bot-name{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;font-weight:700}
+.bot-state-wrap{display:flex;align-items:center;gap:6px}
 .bot-status{font-size:10px;color:var(--green)}
+.ip-wifi-alert{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:16px;height:16px;color:var(--red);font-size:14px;line-height:1;
+  filter:drop-shadow(0 0 5px rgba(255,111,135,.25));
+}
+.ip-wifi-alert[hidden]{display:none}
+.ip-wifi-alert::before{content:"⌁";font-weight:800}
 .bot-ip{margin-top:7px;padding:6px 8px;border-radius:8px;border:1px solid rgba(106,169,255,.18);background:rgba(106,169,255,.07);color:#9cc4ff;font-size:10px;line-height:1.35;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .bot-ip.pending{color:var(--muted);border-color:var(--border);background:rgba(255,255,255,.02)}
 .tor-note{margin-top:7px;padding:6px 8px;border-radius:8px;border:1px solid rgba(169,139,255,.22);background:rgba(169,139,255,.08);color:#c8b8ff;font-size:10px;line-height:1.35}
@@ -1061,12 +1082,25 @@ function renderContainers(){
       botName.className='bot-name';
       botName.textContent=b.bot;
 
+      const stateWrap=document.createElement('span');
+      stateWrap.className='bot-state-wrap';
+
       const botState=document.createElement('span');
       botState.className='bot-status';
       botState.textContent=b.online?'● online':'● offline';
       if(!b.online) botState.style.color='var(--red)';
 
-      head.append(botName,botState);
+      const wifiAlert=document.createElement('span');
+      wifiAlert.className='ip-wifi-alert';
+      wifiAlert.textContent='';
+      wifiAlert.title=b.ip_duplicate
+        ? 'IP compartilhado com '+b.ip_shared_count+' bots'
+        : 'IP exclusivo';
+      wifiAlert.setAttribute('aria-label',wifiAlert.title);
+      wifiAlert.hidden=!b.ip_duplicate;
+
+      stateWrap.append(botState,wifiAlert);
+      head.append(botName,stateWrap);
 
       const ipLine=document.createElement('div');
       ipLine.className='bot-ip'+(b.public_ip?'':' pending');
