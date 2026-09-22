@@ -1,21 +1,17 @@
 #!/usr/bin/env python3
-"""Manager do container - 20 bots com IP proprio e rotacao automatica.
+"""Supervisor enxuto: 20 bots lógicos em um único worker Python."""
 
-Roteamento por bot:
-  1. BOT_PROXY_<NN> (+ _ALTk) -> proxy dedicado (pool rotativo)
-  2. Tor compartilhado        -> circuito isolado por bot (IsolateSOCKSAuth)
-  3. direto                   -> IP da VPS
-
-Rotacao automatica (ip_rotator):
-  * bots em local_timeout / bot_timeout -> reconecta por rota diferente
-  * bots com IP publico duplicado       -> reconecta por rota diferente
-"""
 import os
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
+
+CONTAINER_NAME = os.getenv("CONTAINER_NAME", "container1").strip()
+BOT_COUNT = int(os.getenv("BOT_COUNT", "20"))
+os.environ["CONTAINER_NAME"] = CONTAINER_NAME
+os.environ["BOT_COUNT"] = str(BOT_COUNT)
 
 import ip_rotator
 from ip_rotator import all_bots
@@ -30,17 +26,11 @@ CMD_DIR = BASE_DIR / "commands"
 for directory in (LOG_DIR, PID_DIR, STATE_DIR, CMD_DIR):
     directory.mkdir(exist_ok=True)
 
-CONTAINER_NAME = os.getenv("CONTAINER_NAME", "container1").strip()
-BOT_COUNT = int(os.getenv("BOT_COUNT", "20"))
 TOR_SOCKS_PORT = int(os.getenv("TOR_SOCKS_PORT", "19050"))
 IP_AUDIT_INTERVAL = int(os.getenv("IP_AUDIT_INTERVAL", "90"))
 
-os.environ["CONTAINER_NAME"] = CONTAINER_NAME
-os.environ["BOT_COUNT"] = str(BOT_COUNT)
+print(f"[manager] build={CONTAINER_NAME}-shared-worker-v1", flush=True)
 
-print(f"[manager] build={CONTAINER_NAME}-auto-rotate-v1", flush=True)
-
-# --- Tor compartilhado (um por container, isolamento por bot) --------------- #
 tor = start_shared_tor(BASE_DIR, STATE_DIR, LOG_DIR, TOR_SOCKS_PORT, CONTAINER_NAME)
 tor_process = tor["process"]
 if tor["socks_url"]:
@@ -49,118 +39,81 @@ if tor["socks_url"]:
 else:
     print("[tor] sem SOCKS; bots sem proxy dedicado usarao o IP da VPS", flush=True)
 
-bots = {}
 
-
-def _clean_env(bot_env):
-    for key in ("BOT_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "http_proxy",
-                "https_proxy", "TOR_SOCKS_URL", "TOR_ISOLATION_ID"):
-        bot_env.pop(key, None)
-    return bot_env
-
-
-def launch(bot, gen):
-    env = _clean_env(os.environ.copy())
-    env["BOT_ID"] = bot
-    route = ip_rotator.resolve_route(bot, gen)
-    env.update(route["env"])
-
-    log_file = open(LOG_DIR / f"{bot}.stdout.log", "ab", buffering=0)
+def spawn(name, script, log_name=None):
+    stdout = None
+    handle = None
+    if log_name:
+        handle = open(LOG_DIR / log_name, "ab", buffering=0)
+        stdout = handle
     proc = subprocess.Popen(
-        [sys.executable, str(BASE_DIR / "bot.py")],
+        [sys.executable, str(BASE_DIR / script)],
         cwd=str(BASE_DIR),
-        env=env,
-        stdout=log_file,
-        stderr=subprocess.STDOUT,
+        env=os.environ.copy(),
+        stdout=stdout,
+        stderr=subprocess.STDOUT if stdout is not None else None,
     )
-    (PID_DIR / f"{bot}.pid").write_text(str(proc.pid), encoding="utf-8")
-    return {"proc": proc, "log": log_file, "gen": gen,
-            "mode": route["mode"], "target": route["target"]}
+    return proc, handle
 
 
-def stop(bot):
-    rec = bots.pop(bot, None)
-    if not rec:
-        return
-    proc = rec["proc"]
-    if proc.poll() is None:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-    try:
-        rec["log"].close()
-    except OSError:
-        pass
+worker, worker_log = spawn("worker", "shared_worker.py", "shared-worker.stdout.log")
+bridge, bridge_log = spawn("bridge", "remote_bridge.py")
 
+for bot in all_bots():
+    (PID_DIR / f"{bot}.pid").write_text(str(worker.pid), encoding="utf-8")
 
-def relaunch(bot, reason=None):
-    gen = bots[bot]["gen"] if bot in bots else ip_rotator.generation(bot)
-    if reason:
-        gen = ip_rotator.bump_generation(bot, reason)
-    stop(bot)
-    rec = launch(bot, gen)
-    bots[bot] = rec
-    label = reason or "recovery"
-    print(f"[{bot}] iniciado pid={rec['proc'].pid} gen={gen} "
-          f"route={rec['mode']}:{rec['target']} motivo={label}", flush=True)
-
-
-for _bot in all_bots():
-    relaunch(_bot, None)
-
-bridge = subprocess.Popen(
-    [sys.executable, str(BASE_DIR / "remote_bridge.py")],
-    cwd=str(BASE_DIR),
-    env=os.environ.copy(),
-)
-
-print(f"[manager] {len(bots)} bots iniciados", flush=True)
+print(f"[manager] {BOT_COUNT} bots lógicos no worker pid={worker.pid}", flush=True)
 print(f"[manager] bridge externo iniciado pid={bridge.pid}", flush=True)
 
-# --- auditoria de IP (duplicados) + rotacao por timeout --------------------- #
 if IP_AUDIT_INTERVAL > 0:
     threading.Thread(
-        target=ip_rotator.audit_loop, args=(IP_AUDIT_INTERVAL,), daemon=True
+        target=ip_rotator.audit_loop,
+        args=(IP_AUDIT_INTERVAL,),
+        daemon=True,
     ).start()
     print(f"[manager] auditoria de IP ativa (intervalo={IP_AUDIT_INTERVAL}s)", flush=True)
-else:
-    print("[manager] auditoria de IP desativada (IP_AUDIT_INTERVAL=0)", flush=True)
 
 try:
     while True:
-        for bot in list(bots):
+        for bot in all_bots():
             reason = ip_rotator.consume_rotation(bot)
             if reason:
-                relaunch(bot, reason)
-            elif bots[bot]["proc"].poll() is not None:
-                relaunch(bot, None)
+                gen = ip_rotator.bump_generation(bot, reason)
+                print(f"[route] {bot} -> geração {gen} ({reason})", flush=True)
 
-        if not any(rec["proc"].poll() is None for rec in bots.values()):
-            raise SystemExit("Todos os bots foram encerrados")
+        if worker.poll() is not None:
+            print(f"[manager] shared worker caiu ({worker.returncode}); reiniciando", flush=True)
+            if worker_log:
+                try:
+                    worker_log.close()
+                except OSError:
+                    pass
+            worker, worker_log = spawn("worker", "shared_worker.py", "shared-worker.stdout.log")
+            for bot in all_bots():
+                (PID_DIR / f"{bot}.pid").write_text(str(worker.pid), encoding="utf-8")
 
         if bridge.poll() is not None:
             print(f"[manager] bridge caiu ({bridge.returncode}); reiniciando", flush=True)
-            bridge = subprocess.Popen(
-                [sys.executable, str(BASE_DIR / "remote_bridge.py")],
-                cwd=str(BASE_DIR),
-                env=os.environ.copy(),
-            )
+            bridge, bridge_log = spawn("bridge", "remote_bridge.py")
 
-        time.sleep(2)
+        time.sleep(1)
 
 except KeyboardInterrupt:
     print("[manager] encerrando...", flush=True)
 
 finally:
-    if bridge.poll() is None:
-        bridge.terminate()
+    for proc in (bridge, worker, tor_process):
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
 
-    if tor_process is not None and tor_process.poll() is None:
-        tor_process.terminate()
+    for handle in (worker_log, bridge_log):
+        if handle:
+            try:
+                handle.close()
+            except OSError:
+                pass
 
-    for bot in list(bots):
-        stop(bot)
+    for bot in all_bots():
+        (STATE_DIR / f"{bot}.json").unlink(missing_ok=True)
 
     print("[manager] finalizado", flush=True)
