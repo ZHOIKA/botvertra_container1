@@ -1015,6 +1015,83 @@ button:disabled{cursor:not-allowed;opacity:.55}
   .commandbar .quick{display:grid;grid-template-columns:1fr 1fr}
   .commandbar .quick .chip{width:100%}
 }
+/* dashboard-intuitive-v3 */
+.panel-soft{
+  border:1px solid var(--border);
+  background:rgba(255,255,255,.025);
+  border-radius:14px;
+}
+.infra-head{align-items:center}
+.compact-btn{padding:7px 10px;font-size:11px}
+.infra-toolbar{
+  display:grid;
+  grid-template-columns:minmax(240px,1fr) auto auto;
+  align-items:center;
+  gap:10px;
+  padding:10px;
+  margin-bottom:12px;
+  position:sticky;
+  top:74px;
+  z-index:14;
+  backdrop-filter:blur(12px);
+}
+.search-wrap{position:relative;display:flex;align-items:center}
+.search-wrap input{
+  width:100%;padding:10px 34px 10px 34px;border-radius:11px;
+  background:rgba(4,8,14,.72);border:1px solid var(--border);
+  color:var(--text);outline:none
+}
+.search-wrap input:focus{border-color:rgba(106,169,255,.52);box-shadow:0 0 0 3px rgba(106,169,255,.08)}
+.search-icon{position:absolute;left:12px;color:var(--muted);pointer-events:none}
+.search-clear{
+  position:absolute;right:8px;width:25px;height:25px;border:0;border-radius:8px;
+  background:transparent;color:var(--muted);font-size:18px;cursor:pointer
+}
+.search-clear:hover{background:rgba(255,255,255,.05);color:var(--text)}
+.filter-group{display:flex;gap:6px;flex-wrap:wrap}
+.filter-chip{
+  border:1px solid var(--border);background:transparent;color:var(--muted);
+  border-radius:999px;padding:7px 10px;font-size:10px;font-weight:700;cursor:pointer
+}
+.filter-chip:hover{color:var(--text);border-color:var(--border2)}
+.filter-chip.active{
+  color:#dceaff;background:rgba(106,169,255,.12);border-color:rgba(106,169,255,.35)
+}
+.filter-count{font-size:11px;color:var(--muted);white-space:nowrap}
+.container-card.is-collapsed .bulk-actions,
+.container-card.is-collapsed .bots-grid{display:none}
+.container-toggle{
+  border:0;background:transparent;color:var(--muted);cursor:pointer;
+  font-size:14px;padding:6px 8px;border-radius:8px
+}
+.container-toggle:hover{background:rgba(255,255,255,.05);color:var(--text)}
+.container-actions-top{display:flex;align-items:center;gap:7px}
+.bot{cursor:pointer}
+.bot.selected{
+  outline:2px solid rgba(106,169,255,.42);
+  outline-offset:1px;
+  border-color:rgba(106,169,255,.42)
+}
+.bot-no-results{
+  padding:22px;text-align:center;color:var(--muted);
+  border:1px dashed var(--border);border-radius:14px
+}
+.legend{
+  display:flex;gap:12px;flex-wrap:wrap;margin:0 0 10px 2px;
+  color:var(--muted);font-size:10px
+}
+.legend span{display:inline-flex;align-items:center;gap:5px}
+.legend-dot{width:7px;height:7px;border-radius:50%;background:var(--green)}
+.legend-alert{width:8px;height:8px;border-radius:3px;background:rgba(255,111,135,.7)}
+@media (max-width:980px){
+  .infra-toolbar{grid-template-columns:1fr;position:relative;top:auto}
+  .filter-count{justify-self:start}
+}
+@media (max-width:520px){
+  .filter-group{display:grid;grid-template-columns:1fr 1fr}
+  .filter-chip{width:100%}
+  .infra-head{align-items:flex-start}
+}
 </style>
 </head>
 <body>
@@ -1039,7 +1116,7 @@ button:disabled{cursor:not-allowed;opacity:.55}
     <div class="stat"><div class="label">Containers</div><div id="statContainers" class="value">—</div><div id="statContainersSub" class="sub">sem dados</div></div>
     <div class="stat"><div class="label">Bots</div><div id="statBots" class="value">—</div><div id="statBotsSub" class="sub">sem dados</div></div>
     <div class="stat"><div class="label">Online</div><div id="statOnline" class="value">—</div><div class="sub">workers disponíveis</div></div>
-    <div class="stat"><div class="label">Atualização</div><div id="statRefresh" class="value" style="font-size:16px;margin-top:9px">—</div><div class="sub">tempo real</div></div>
+    <div class="stat"><div class="label">IPs exclusivos</div><div id="statRefresh" class="value">—</div><div id="statIpSub" class="sub">sem dados</div></div>
   </section>
 
   <section class="panel auth">
@@ -1078,11 +1155,33 @@ button:disabled{cursor:not-allowed;opacity:.55}
 
   <main class="content-grid">
     <section>
-      <div class="section-head">
+      <div class="section-head infra-head">
         <div>
           <h2>Infraestrutura</h2>
           <p id="infraSubtitle">Aguardando dados dos containers.</p>
         </div>
+        <button id="collapseAllBtn" class="btn ghost compact-btn" type="button">Recolher todos</button>
+      </div>
+
+      <div class="infra-toolbar panel-soft">
+        <div class="search-wrap">
+          <span class="search-icon">⌕</span>
+          <input id="botSearch" autocomplete="off" spellcheck="false" placeholder="Buscar bot, container ou IP…">
+          <button id="clearSearchBtn" class="search-clear" type="button" title="Limpar busca">×</button>
+        </div>
+        <div class="filter-group" id="botFilters" aria-label="Filtros">
+          <button class="filter-chip active" data-filter="all" type="button">Todos</button>
+          <button class="filter-chip" data-filter="alert" type="button">⚠ IP repetido</button>
+          <button class="filter-chip" data-filter="online" type="button">● Online</button>
+          <button class="filter-chip" data-filter="offline" type="button">● Offline</button>
+        </div>
+        <div id="filterCount" class="filter-count">0 bots</div>
+      </div>
+
+      <div class="legend">
+        <span><i class="legend-dot"></i> bot online</span>
+        <span><i class="legend-alert"></i> IP compartilhado</span>
+        <span>Toque no card para selecionar no console</span>
       </div>
       <div id="containers" class="containers">
         <div class="empty"><strong>Nenhum dado carregado</strong>Salve o token para consultar os containers.</div>
@@ -1095,6 +1194,7 @@ button:disabled{cursor:not-allowed;opacity:.55}
         <div class="output-tools">
           <span id="outputStatus" class="output-status">pronto</span>
           <button id="copyTerminalBtn" class="btn ghost terminal-copy" type="button">Copiar tudo</button>
+          <button id="clearTerminalBtn" class="btn ghost terminal-copy" type="button">Limpar</button>
         </div>
       </div>
       <pre id="out" class="terminal">BotVertra pronto.</pre>
@@ -1131,11 +1231,21 @@ const statOnline = document.getElementById('statOnline');
 const statRefresh = document.getElementById('statRefresh');
 const terminalFab=document.getElementById('terminalFab');
 const terminalPanel=document.querySelector('.output');
+const botSearch=document.getElementById('botSearch');
+const clearSearchBtn=document.getElementById('clearSearchBtn');
+const botFilters=document.getElementById('botFilters');
+const filterCount=document.getElementById('filterCount');
+const collapseAllBtn=document.getElementById('collapseAllBtn');
+const clearTerminalBtn=document.getElementById('clearTerminalBtn');
+const statIpSub=document.getElementById('statIpSub');
 
 let data = [];
 let loading = false;
 let liveSocket = null;
 let liveRetry = null;
+let botFilter = 'all';
+let collapsedContainers = new Set();
+let selectedTarget = {container:null, bot:null};
 
 if(terminalFab && terminalPanel){
   terminalFab.addEventListener('click',()=>{
@@ -1193,6 +1303,11 @@ async function copyTerminalAll(){
 
 if(copyTerminalBtn){
   copyTerminalBtn.addEventListener('click',copyTerminalAll);
+}
+if(clearTerminalBtn){
+  clearTerminalBtn.addEventListener('click',()=>{
+    setOutput('BotVertra pronto.','pronto');
+  });
 }
 
 function revealTerminal(){
@@ -1357,13 +1472,88 @@ function rebuildSelectors(){
     botSel.value=prevBot;
   }
 }
-containerSel.addEventListener('change',rebuildSelectors);
+containerSel.addEventListener('change',()=>{
+  rebuildSelectors();
+  selectedTarget={container:containerSel.value==='all'?null:containerSel.value,bot:null};
+  renderContainers();
+});
+botSel.addEventListener('change',()=>{
+  selectedTarget={
+    container:containerSel.value==='all'?null:containerSel.value,
+    bot:botSel.value==='all'?null:botSel.value
+  };
+  renderContainers();
+});
+
+if(botSearch){
+  botSearch.addEventListener('input',renderContainers);
+}
+if(clearSearchBtn){
+  clearSearchBtn.addEventListener('click',()=>{
+    botSearch.value='';
+    renderContainers();
+    botSearch.focus();
+  });
+}
+if(botFilters){
+  botFilters.addEventListener('click',(e)=>{
+    const bt=e.target.closest('[data-filter]');
+    if(!bt) return;
+    botFilter=bt.dataset.filter;
+    for(const chip of botFilters.querySelectorAll('[data-filter]')){
+      chip.classList.toggle('active',chip===bt);
+    }
+    renderContainers();
+  });
+}
+if(collapseAllBtn){
+  collapseAllBtn.addEventListener('click',()=>{
+    if(data.length && collapsedContainers.size>=data.length){
+      collapsedContainers.clear();
+    }else{
+      collapsedContainers=new Set(data.map(c=>c.name));
+    }
+    renderContainers();
+    updateCollapseButton();
+  });
+}
 
 document.addEventListener('click',(e)=>{
   for(const el of document.querySelectorAll('.bot-more[open],.bulk-more[open]')){
     if(!el.contains(e.target)) el.open=false;
   }
 });
+
+function normalizedSearch(){
+  return (botSearch?.value || '').trim().toLowerCase();
+}
+
+function botMatchesFilters(container,b){
+  const q=normalizedSearch();
+  const searchable=(container.name+' '+b.bot+' '+(b.public_ip||'')).toLowerCase();
+  if(q && !searchable.includes(q)) return false;
+
+  if(botFilter==='alert' && !b.ip_duplicate) return false;
+  if(botFilter==='online' && !b.online) return false;
+  if(botFilter==='offline' && b.online) return false;
+  return true;
+}
+
+function selectBotTarget(containerName,botName){
+  selectedTarget={container:containerName,bot:botName};
+  containerSel.value=containerName;
+  rebuildSelectors();
+  botSel.value=botName;
+  commandInput.focus();
+  renderContainers();
+}
+
+function updateCollapseButton(){
+  const total=data.length;
+  collapseAllBtn.textContent=total>0 && collapsedContainers.size>=total
+    ? 'Expandir todos'
+    : 'Recolher todos';
+}
 
 function renderStats(){
   const totalContainers=data.length;
@@ -1376,7 +1566,18 @@ function renderStats(){
   statBots.textContent=totalBots || '0';
   statBotsSub.textContent='registrados';
   statOnline.textContent=onlineBots || '0';
-  statRefresh.textContent=totalContainers?nowLabel():'—';
+
+  const allBots=data.flatMap(c=>c.bots);
+  const exclusiveIps=new Set(
+    allBots.filter(b=>b.public_ip && !b.ip_duplicate).map(b=>b.public_ip)
+  );
+  const duplicateBots=allBots.filter(b=>b.ip_duplicate).length;
+  statRefresh.textContent=exclusiveIps.size;
+  if(statIpSub){
+    statIpSub.textContent=duplicateBots
+      ? duplicateBots+' bot'+(duplicateBots===1?'':'s')+' com IP repetido'
+      : 'nenhum IP repetido';
+  }
 
   if(totalContainers){
     infraSubtitle.textContent=onlineContainers+'/'+totalContainers+' containers online • '+onlineBots+'/'+totalBots+' bots disponíveis';
@@ -1398,14 +1599,27 @@ function actionButton(label,handler){
 
 function renderContainers(){
   containersEl.innerHTML='';
+
   if(!data.length){
     containersEl.innerHTML='<div class="empty"><strong>Nenhum container encontrado</strong>Verifique se os bridges estão conectados ao controller.</div>';
+    if(filterCount) filterCount.textContent='0 bots';
     return;
   }
 
+  let visibleTotal=0;
+
   for(const c of data){
+    const visibleBots=c.bots.filter(b=>botMatchesFilters(c,b));
+    const query=normalizedSearch();
+    const containerMatches=query && c.name.toLowerCase().includes(query);
+
+    if(!visibleBots.length && !containerMatches) continue;
+
+    const botsToShow=containerMatches && !visibleBots.length ? c.bots : visibleBots;
+    visibleTotal+=botsToShow.length;
+
     const card=document.createElement('article');
-    card.className='panel container-card';
+    card.className='panel container-card'+(collapsedContainers.has(c.name)?' is-collapsed':'');
 
     const top=document.createElement('div');
     top.className='container-top';
@@ -1421,16 +1635,37 @@ function renderContainers(){
     const name=document.createElement('div');
     name.className='container-name';
     name.textContent=c.name;
+
+    const alerts=c.bots.filter(b=>b.ip_duplicate).length;
     const meta=document.createElement('div');
     meta.className='container-meta';
-    meta.textContent=c.bots.length+' bots • última atividade '+fmtTime(c.last_seen);
+    meta.textContent=c.bots.length+' bots • '+alerts+' alerta'+(alerts===1?'':'s')+' • atividade '+fmtTime(c.last_seen);
+
     texts.append(name,meta);
     titleWrap.append(icon,texts);
+
+    const topActions=document.createElement('div');
+    topActions.className='container-actions-top';
 
     const badge=document.createElement('span');
     badge.className='badge '+(c.online?'online':'offline');
     badge.textContent=(c.online?'● ONLINE':'● OFFLINE');
-    top.append(titleWrap,badge);
+
+    const toggle=document.createElement('button');
+    toggle.type='button';
+    toggle.className='container-toggle';
+    toggle.title=collapsedContainers.has(c.name)?'Expandir container':'Recolher container';
+    toggle.textContent=collapsedContainers.has(c.name)?'▾':'▴';
+    toggle.addEventListener('click',(e)=>{
+      e.stopPropagation();
+      if(collapsedContainers.has(c.name)) collapsedContainers.delete(c.name);
+      else collapsedContainers.add(c.name);
+      renderContainers();
+      updateCollapseButton();
+    });
+
+    topActions.append(badge,toggle);
+    top.append(titleWrap,topActions);
 
     const bulk=document.createElement('div');
     bulk.className='bulk-actions';
@@ -1445,18 +1680,34 @@ function renderContainers(){
     bulkSummary.textContent='Mais ▾';
     const bulkMenu=document.createElement('div');
     bulkMenu.className='more-menu';
+
     for(const cmd of ['uptime','memory','disk','internet','public_ip']){
       bulkMenu.appendChild(actionButton(cmd,()=>run(c.name,'all',cmd)));
     }
+
     bulkMore.append(bulkSummary,bulkMenu);
     bulk.appendChild(bulkMore);
 
     const grid=document.createElement('div');
     grid.className='bots-grid';
 
-    for(const b of c.bots){
+    for(const b of botsToShow){
       const bot=document.createElement('div');
-      bot.className='bot'+(b.ip_duplicate?' ip-duplicate':'');
+      const selected=selectedTarget.container===c.name && selectedTarget.bot===b.bot;
+      bot.className='bot'+(b.ip_duplicate?' ip-duplicate':'')+(selected?' selected':'');
+      bot.tabIndex=0;
+      bot.title='Selecionar '+c.name+'/'+b.bot+' no console';
+
+      bot.addEventListener('click',(e)=>{
+        if(e.target.closest('button,details,summary')) return;
+        selectBotTarget(c.name,b.bot);
+      });
+      bot.addEventListener('keydown',(e)=>{
+        if(e.key==='Enter' || e.key===' '){
+          e.preventDefault();
+          selectBotTarget(c.name,b.bot);
+        }
+      });
 
       const head=document.createElement('div');
       head.className='bot-head';
@@ -1539,12 +1790,23 @@ function renderContainers(){
       }else{
         bot.append(head,ipLine,actions);
       }
+
       grid.appendChild(bot);
     }
 
     card.append(top,bulk,grid);
     containersEl.appendChild(card);
   }
+
+  if(!containersEl.children.length){
+    containersEl.innerHTML='<div class="bot-no-results"><strong>Nenhum bot encontrado</strong><br>Ajuste a busca ou os filtros.</div>';
+  }
+
+  if(filterCount){
+    filterCount.textContent=visibleTotal+' bot'+(visibleTotal===1?'':'s')+' visível'+(visibleTotal===1?'':'is');
+  }
+
+  updateCollapseButton();
 }
 
 async function loadBots(manual=false){
