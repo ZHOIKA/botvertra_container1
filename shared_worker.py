@@ -174,6 +174,20 @@ def internet_check(bot):
         }
 
 
+def write_json_atomic(path, payload):
+    """Publica JSON completo de uma vez para evitar leitura parcial pelo bridge."""
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    data = json.dumps(payload, indent=2)
+
+    with open(tmp, "w", encoding="utf-8") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+    os.replace(tmp, path)
+
+
 def tail_logs(bot, lines=40):
     lines = max(1, min(int(lines), 200))
     result = []
@@ -271,7 +285,7 @@ async def bot_loop(bot):
                 try:
                     payload = json.loads(inbox.read_text(encoding="utf-8"))
                     result = await asyncio.to_thread(execute_command, bot, payload)
-                    outbox.write_text(json.dumps(result, indent=2), encoding="utf-8")
+                    write_json_atomic(outbox, result)
                     inbox.unlink(missing_ok=True)
 
                     with open(LOG_DIR / f"{bot}.log", "a", encoding="utf-8") as log:
@@ -281,9 +295,9 @@ async def bot_loop(bot):
                             "output": result,
                         }) + "\n")
                 except Exception as exc:
-                    outbox.write_text(json.dumps({
+                    write_json_atomic(outbox, {
                         "ok": False, "bot": bot, "error": str(exc)
-                    }, indent=2), encoding="utf-8")
+                    })
                     inbox.unlink(missing_ok=True)
 
             await asyncio.sleep(0.15)
