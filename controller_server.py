@@ -887,6 +887,9 @@ button:disabled{cursor:not-allowed;opacity:.55}
   .container-top{align-items:flex-start}
 }
 /* dashboard-clean-v2 */
+.output-tools{display:flex;align-items:center;gap:8px}
+.terminal-copy{padding:6px 9px;font-size:10px;white-space:nowrap}
+
 .shell{max-width:1500px;padding:18px}
 .header{position:sticky;top:0;z-index:20;padding:12px 0 14px;background:linear-gradient(180deg,rgba(7,11,18,.96),rgba(7,11,18,.82),transparent);backdrop-filter:blur(14px)}
 .stats{gap:10px;margin:12px 0}
@@ -1089,7 +1092,10 @@ button:disabled{cursor:not-allowed;opacity:.55}
     <aside class="panel output">
       <div class="output-head">
         <h2>Terminal</h2>
-        <span id="outputStatus" class="output-status">pronto</span>
+        <div class="output-tools">
+          <span id="outputStatus" class="output-status">pronto</span>
+          <button id="copyTerminalBtn" class="btn ghost terminal-copy" type="button">Copiar tudo</button>
+        </div>
       </div>
       <pre id="out" class="terminal">BotVertra pronto.</pre>
     </aside>
@@ -1113,6 +1119,7 @@ const commandInput = document.getElementById('command');
 const runBtn = document.getElementById('runBtn');
 const out = document.getElementById('out');
 const outputStatus = document.getElementById('outputStatus');
+const copyTerminalBtn=document.getElementById('copyTerminalBtn');
 const globalDot = document.getElementById('globalDot');
 const globalText = document.getElementById('globalText');
 const infraSubtitle = document.getElementById('infraSubtitle');
@@ -1153,6 +1160,41 @@ function setGlobal(ok,text){
   globalDot.className='dot '+(ok?'online':'offline');
   globalText.textContent=text;
 }
+async function copyTerminalAll(){
+  const text=out.textContent || '';
+  if(!text) return;
+
+  let copied=false;
+  try{
+    if(navigator.clipboard && window.isSecureContext){
+      await navigator.clipboard.writeText(text);
+      copied=true;
+    }
+  }catch(e){}
+
+  if(!copied){
+    try{
+      const ta=document.createElement('textarea');
+      ta.value=text;
+      ta.setAttribute('readonly','');
+      ta.style.position='fixed';
+      ta.style.opacity='0';
+      document.body.appendChild(ta);
+      ta.select();
+      copied=document.execCommand('copy');
+      ta.remove();
+    }catch(e){}
+  }
+
+  const old=copyTerminalBtn.textContent;
+  copyTerminalBtn.textContent=copied?'Copiado ✓':'Falhou';
+  setTimeout(()=>{copyTerminalBtn.textContent=old},1400);
+}
+
+if(copyTerminalBtn){
+  copyTerminalBtn.addEventListener('click',copyTerminalAll);
+}
+
 function revealTerminal(){
   if(window.matchMedia('(max-width:820px)').matches && terminalPanel){
     terminalPanel.classList.add('mobile-open');
