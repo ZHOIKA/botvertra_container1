@@ -809,6 +809,14 @@ button:disabled{cursor:not-allowed;opacity:.55}
 }
 .ip-wifi-alert[hidden]{display:none}
 .ip-wifi-alert::before{content:"⌁";font-weight:800}
+.bot.ip-duplicate{
+  border-color:rgba(255,111,135,.42)!important;
+  background:linear-gradient(180deg,rgba(255,111,135,.10),rgba(255,111,135,.045))!important;
+  box-shadow:inset 0 0 0 1px rgba(255,111,135,.05),0 8px 24px rgba(255,45,85,.05);
+}
+.bot.ip-duplicate:hover{
+  border-color:rgba(255,111,135,.58)!important;
+}
 .bot-ip{margin-top:7px;padding:6px 8px;border-radius:8px;border:1px solid rgba(106,169,255,.18);background:rgba(106,169,255,.07);color:#9cc4ff;font-size:10px;line-height:1.35;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .bot-ip.pending{color:var(--muted);border-color:var(--border);background:rgba(255,255,255,.02)}
 .tor-note{margin-top:7px;padding:6px 8px;border-radius:8px;border:1px solid rgba(169,139,255,.22);background:rgba(169,139,255,.08);color:#c8b8ff;font-size:10px;line-height:1.35}
@@ -1231,7 +1239,7 @@ function renderContainers(){
 
     for(const b of c.bots){
       const bot=document.createElement('div');
-      bot.className='bot';
+      bot.className='bot'+(b.ip_duplicate?' ip-duplicate':'');
 
       const head=document.createElement('div');
       head.className='bot-head';
